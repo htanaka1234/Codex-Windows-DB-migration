@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+
+# Codex databases and runtime sidecars
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+
+# Session and UI state may contain private conversation metadata
+*.jsonl
+.codex/
+.agents/
+
+# Recovery outputs and local working data
+.tmp/
+*-backup-*/
+codex-global-state.before-*.json
+session_index.before-*.jsonl
+state_5.live-before-*
