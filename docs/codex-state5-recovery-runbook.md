@@ -22,7 +22,8 @@ Windows形式のままだと、WSLエージェント時のUIには表示され�
 
 ```text
 %CODEX_HOME%        = %USERPROFILE%\.codex
-%RECOVERY_WORKDIR%  = 復旧作業用ディレクトリ
+%RECOVERY_WORKDIR%  = Codex-Windows-DB-migration のローカル作業ツリー
+%BACKUP_ROOT%       = 復旧バックアップの出力先
 %WORKSPACE_ROOT%    = 対象プロジェクトのWindows側ワークスペースルート
 %PROJECT_NAME%      = 対象プロジェクト名
 %TARGET_STYLE%      = windows または wsl
@@ -32,12 +33,13 @@ Windows形式のままだと、WSLエージェント時のUIには表示され�
 
 ```text
 %CODEX_HOME%\state_5.sqlite
-%RECOVERY_WORKDIR%\.tmp\current_history_visibility_audit.py
+%RECOVERY_WORKDIR%\scripts\current_history_visibility_audit.py
+%BACKUP_ROOT%\rollout-session-meta-backup-windows-YYYYMMDD-HHMMSS
 %WORKSPACE_ROOT%\%PROJECT_NAME%
 ```
 
-`%RECOVERY_WORKDIR%` は、バックアップや補助スクリプトを置く任意の安全な
-作業ディレクトリです。
+`%RECOVERY_WORKDIR%` は、このリポジトリをクローンしたディレクトリです。
+バックアップは、Codex homeと作業ツリーの外側にある `%BACKUP_ROOT%` へ保存します。
 
 エージェント別の推奨 `TARGET_STYLE`:
 
@@ -52,9 +54,9 @@ WSL上からライブの `%USERPROFILE%\.codex` を直す場合は、以下の�
 しておくと誤って復旧作業ディレクトリだけを処理せずに済みます。
 
 ```sh
-python3 .tmp/repair_rollout_session_meta.py dry-run --target-style wsl --codex-home /mnt/c/Users/WINDOWS_USERNAME/.codex --backup-root /mnt/c/path/to/codex-backups
-python3 .tmp/normalize_history_cwd.py dry-run --target-style wsl --codex-home /mnt/c/Users/WINDOWS_USERNAME/.codex --backup-root /mnt/c/path/to/codex-backups
-python3 .tmp/repair_ui_indexes.py dry-run --target-style wsl --codex-home /mnt/c/Users/WINDOWS_USERNAME/.codex --backup-root /mnt/c/path/to/codex-backups
+python3 scripts/repair_rollout_session_meta.py dry-run --target-style wsl --codex-home /mnt/c/Users/WINDOWS_USERNAME/.codex --backup-root /mnt/c/path/to/codex-backups
+python3 scripts/normalize_history_cwd.py dry-run --target-style wsl --codex-home /mnt/c/Users/WINDOWS_USERNAME/.codex --backup-root /mnt/c/path/to/codex-backups
+python3 scripts/repair_ui_indexes.py dry-run --target-style wsl --codex-home /mnt/c/Users/WINDOWS_USERNAME/.codex --backup-root /mnt/c/path/to/codex-backups
 ```
 
 ただし、Codex app を WSL エージェントへ切り替えた後は、WSL側の
@@ -63,16 +65,16 @@ python3 .tmp/repair_ui_indexes.py dry-run --target-style wsl --codex-home /mnt/c
 次の2つを比較してください。
 
 ```sh
-python3 .tmp/current_history_visibility_audit.py --target-style wsl --codex-home /mnt/c/Users/WINDOWS_USERNAME/.codex
-python3 .tmp/current_history_visibility_audit.py --target-style wsl --codex-home /home/WSL_USERNAME/.codex
+python3 scripts/current_history_visibility_audit.py --target-style wsl --codex-home /mnt/c/Users/WINDOWS_USERNAME/.codex
+python3 scripts/current_history_visibility_audit.py --target-style wsl --codex-home /home/WSL_USERNAME/.codex
 ```
 
 Windows側に復旧済み履歴があり、WSL側が空に近い場合は、Codex appを完全終了
 してからWSL側Codex homeへ移植します。
 
 ```sh
-python3 .tmp/migrate_windows_codex_home_to_wsl.py dry-run --source-home /mnt/c/Users/WINDOWS_USERNAME/.codex --dest-home /home/WSL_USERNAME/.codex --backup-root /mnt/c/path/to/codex-backups
-python3 .tmp/migrate_windows_codex_home_to_wsl.py apply --source-home /mnt/c/Users/WINDOWS_USERNAME/.codex --dest-home /home/WSL_USERNAME/.codex --backup-root /mnt/c/path/to/codex-backups
+python3 scripts/migrate_windows_codex_home_to_wsl.py dry-run --source-home /mnt/c/Users/WINDOWS_USERNAME/.codex --dest-home /home/WSL_USERNAME/.codex --backup-root /mnt/c/path/to/codex-backups
+python3 scripts/migrate_windows_codex_home_to_wsl.py apply --source-home /mnt/c/Users/WINDOWS_USERNAME/.codex --dest-home /home/WSL_USERNAME/.codex --backup-root /mnt/c/path/to/codex-backups
 ```
 
 この移植は以下を行います。
@@ -233,11 +235,11 @@ WSLからWindowsネイティブへの切り替え全体を戻す場合は、各�
 補助スクリプト配置例:
 
 ```text
-%RECOVERY_WORKDIR%\.tmp\current_history_visibility_audit.py
-%RECOVERY_WORKDIR%\.tmp\repair_rollout_session_meta.py
-%RECOVERY_WORKDIR%\.tmp\normalize_history_cwd.py
-%RECOVERY_WORKDIR%\.tmp\repair_ui_indexes.py
-%RECOVERY_WORKDIR%\.tmp\transplant_state5.py
+%RECOVERY_WORKDIR%\scripts\current_history_visibility_audit.py
+%RECOVERY_WORKDIR%\scripts\repair_rollout_session_meta.py
+%RECOVERY_WORKDIR%\scripts\normalize_history_cwd.py
+%RECOVERY_WORKDIR%\scripts\repair_ui_indexes.py
+%RECOVERY_WORKDIR%\scripts\transplant_state5.py
 ```
 
 ## WSLからWindowsネイティブへ切り替える場合
@@ -264,7 +266,7 @@ WSL用DBの `_sqlx_migrations.checksum` は書き換えず、Windowsネイティ
 
 ```sh
 CODEX_HOME=/mnt/c/Users/WINDOWS_USERNAME/.codex
-RECOVERY_WORKDIR=/mnt/c/path/to/recover_codex_sessions
+RECOVERY_WORKDIR=/mnt/c/path/to/Codex-Windows-DB-migration
 BACKUP_ROOT=/mnt/c/path/to/codex-backups
 ```
 
@@ -272,7 +274,7 @@ PowerShellでは、同じパスをWindows形式で設定します。
 
 ```powershell
 $CodexHome = Join-Path $env:USERPROFILE ".codex"
-$RecoveryWorkdir = "C:\path\to\recover_codex_sessions"
+$RecoveryWorkdir = "C:\path\to\Codex-Windows-DB-migration"
 $BackupRoot = "C:\path\to\codex-backups"
 ```
 
@@ -280,7 +282,7 @@ $BackupRoot = "C:\path\to\codex-backups"
 
 ```bat
 set "CODEX_HOME=%USERPROFILE%\.codex"
-set "RECOVERY_WORKDIR=C:\path\to\recover_codex_sessions"
+set "RECOVERY_WORKDIR=C:\path\to\Codex-Windows-DB-migration"
 set "BACKUP_ROOT=C:\path\to\codex-backups"
 ```
 
@@ -809,7 +811,7 @@ Codexが SQLx migration checksum エラーで起動できない場合は、古�
 
 ```cmd
 cd /d %RECOVERY_WORKDIR%
-python .tmp\current_history_visibility_audit.py
+python scripts\current_history_visibility_audit.py
 ```
 
 確認ポイント:
@@ -823,8 +825,8 @@ python .tmp\current_history_visibility_audit.py
 クリーンDBに古い履歴行が存在しない場合だけ、移植ヘルパーを使います。
 
 ```cmd
-python .tmp\transplant_state5.py analyze
-python .tmp\transplant_state5.py merge-live
+python scripts\transplant_state5.py analyze
+python scripts\transplant_state5.py merge-live
 ```
 
 多くの場合、CodexがJSONLから履歴行を再構築済みであれば、旧DBからの
@@ -855,13 +857,13 @@ WSLエージェント時にCodexが期待する形式:
 まずドライランします。
 
 ```cmd
-python .tmp\repair_rollout_session_meta.py dry-run --target-style %TARGET_STYLE%
+python scripts\repair_rollout_session_meta.py dry-run --target-style %TARGET_STYLE%
 ```
 
 `files_to_update` が0でなければ適用します。
 
 ```cmd
-python .tmp\repair_rollout_session_meta.py apply --target-style %TARGET_STYLE%
+python scripts\repair_rollout_session_meta.py apply --target-style %TARGET_STYLE%
 ```
 
 このスクリプトは、JSONLの先頭行が `type=session_meta` の場合だけ、その
@@ -874,7 +876,7 @@ python .tmp\repair_rollout_session_meta.py apply --target-style %TARGET_STYLE%
 - `payload.thread_source`: `source="vscode"` なら `user`
 - `payload.thread_source`: `source={"subagent":...}` なら `subagent`
 
-バックアップは `%RECOVERY_WORKDIR%\rollout-session-meta-backup-*` に作られます。
+バックアップは `%BACKUP_ROOT%\rollout-session-meta-backup-*` に作られます。
 
 空または壊れた `rollout-*.jsonl` があるとJSON parse errorが出ます。DBから
 参照されていないファイルであれば、履歴表示の直接原因とは限りません。
@@ -884,8 +886,8 @@ python .tmp\repair_rollout_session_meta.py apply --target-style %TARGET_STYLE%
 JSONLを直した後、DBキャッシュ側を同期します。
 
 ```cmd
-python .tmp\normalize_history_cwd.py dry-run --target-style %TARGET_STYLE%
-python .tmp\normalize_history_cwd.py apply --target-style %TARGET_STYLE%
+python scripts\normalize_history_cwd.py dry-run --target-style %TARGET_STYLE%
+python scripts\normalize_history_cwd.py apply --target-style %TARGET_STYLE%
 ```
 
 このスクリプトは `threads.cwd` を対象エージェントの現行形式へ揃えます。
@@ -918,8 +920,8 @@ DBとJSONLを直してもUIに出ない場合、`session_index.jsonl` と
 `.codex-global-state.json` の補助状態も同期します。
 
 ```cmd
-python .tmp\repair_ui_indexes.py dry-run --target-style %TARGET_STYLE%
-python .tmp\repair_ui_indexes.py apply --target-style %TARGET_STYLE%
+python scripts\repair_ui_indexes.py dry-run --target-style %TARGET_STYLE%
+python scripts\repair_ui_indexes.py apply --target-style %TARGET_STYLE%
 ```
 
 このスクリプトは以下を行います。
@@ -943,10 +945,10 @@ thread_workspace_root_hints count == visible user thread count
 以下を実行します。
 
 ```cmd
-python .tmp\repair_rollout_session_meta.py dry-run --target-style %TARGET_STYLE%
-python .tmp\normalize_history_cwd.py dry-run --target-style %TARGET_STYLE%
-python .tmp\repair_ui_indexes.py dry-run --target-style %TARGET_STYLE%
-python .tmp\current_history_visibility_audit.py --target-style %TARGET_STYLE%
+python scripts\repair_rollout_session_meta.py dry-run --target-style %TARGET_STYLE%
+python scripts\normalize_history_cwd.py dry-run --target-style %TARGET_STYLE%
+python scripts\repair_ui_indexes.py dry-run --target-style %TARGET_STYLE%
+python scripts\current_history_visibility_audit.py --target-style %TARGET_STYLE%
 ```
 
 期待結果:
@@ -986,7 +988,7 @@ DB上には履歴があり `session_index.jsonl` にもIDがあるのに、UIの
 
 ## ロールバック
 
-各 `apply` は `%RECOVERY_WORKDIR%` 配下にバックアップを作成します。
+各 `apply` は `%BACKUP_ROOT%` 配下にバックアップを作成します。
 ロールバックする場合はCodexを完全終了し、必要なファイルを戻します。
 
 - JSONLメタデータ:
