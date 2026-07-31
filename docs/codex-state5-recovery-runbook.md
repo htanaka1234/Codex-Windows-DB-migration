@@ -44,17 +44,17 @@ Windows形式のままだと、WSLエージェント時のUIには表示され�
 - Windows ネイティブエージェント: `windows`
 - WSL エージェント: `wsl`
 
-`wsl` の場合、`C:\src\project` や `\\?\C:\src\project` は
-`/mnt/c/src/project` に正規化します。`windows` の場合、DB内の `threads.cwd`
+`wsl` の場合、`C:\path\to\project` や `\\?\C:\path\to\project` は
+`/mnt/c/path/to/project` に正規化します。`windows` の場合、DB内の `threads.cwd`
 は `\\?\C:\...`、rollout JSONL と UI補助状態は `C:\...` へ正規化します。
 
 WSL上からライブの `%USERPROFILE%\.codex` を直す場合は、以下のように明示
 しておくと誤って復旧作業ディレクトリだけを処理せずに済みます。
 
 ```sh
-python3 .tmp/repair_rollout_session_meta.py dry-run --target-style wsl --codex-home /mnt/c/Users/WINDOWS_USERNAME/.codex --backup-root /mnt/c/src/.codex_bak
-python3 .tmp/normalize_history_cwd.py dry-run --target-style wsl --codex-home /mnt/c/Users/WINDOWS_USERNAME/.codex --backup-root /mnt/c/src/.codex_bak
-python3 .tmp/repair_ui_indexes.py dry-run --target-style wsl --codex-home /mnt/c/Users/WINDOWS_USERNAME/.codex --backup-root /mnt/c/src/.codex_bak
+python3 .tmp/repair_rollout_session_meta.py dry-run --target-style wsl --codex-home /mnt/c/Users/WINDOWS_USERNAME/.codex --backup-root /mnt/c/path/to/codex-backups
+python3 .tmp/normalize_history_cwd.py dry-run --target-style wsl --codex-home /mnt/c/Users/WINDOWS_USERNAME/.codex --backup-root /mnt/c/path/to/codex-backups
+python3 .tmp/repair_ui_indexes.py dry-run --target-style wsl --codex-home /mnt/c/Users/WINDOWS_USERNAME/.codex --backup-root /mnt/c/path/to/codex-backups
 ```
 
 ただし、Codex app を WSL エージェントへ切り替えた後は、WSL側の
@@ -71,8 +71,8 @@ Windows側に復旧済み履歴があり、WSL側が空に近い場合は、Code
 してからWSL側Codex homeへ移植します。
 
 ```sh
-python3 .tmp/migrate_windows_codex_home_to_wsl.py dry-run --source-home /mnt/c/Users/WINDOWS_USERNAME/.codex --dest-home /home/WSL_USERNAME/.codex --backup-root /mnt/c/src/.codex_bak
-python3 .tmp/migrate_windows_codex_home_to_wsl.py apply --source-home /mnt/c/Users/WINDOWS_USERNAME/.codex --dest-home /home/WSL_USERNAME/.codex --backup-root /mnt/c/src/.codex_bak
+python3 .tmp/migrate_windows_codex_home_to_wsl.py dry-run --source-home /mnt/c/Users/WINDOWS_USERNAME/.codex --dest-home /home/WSL_USERNAME/.codex --backup-root /mnt/c/path/to/codex-backups
+python3 .tmp/migrate_windows_codex_home_to_wsl.py apply --source-home /mnt/c/Users/WINDOWS_USERNAME/.codex --dest-home /home/WSL_USERNAME/.codex --backup-root /mnt/c/path/to/codex-backups
 ```
 
 この移植は以下を行います。
@@ -110,21 +110,21 @@ DBを書き換えるため、`apply` はCodex appが完全終了している状�
 PowerShell:
 
 ```powershell
-$BackupRoot = "C:\CodexBackups\wsl-to-windows"
+$BackupRoot = "C:\path\to\codex-backups\wsl-to-windows"
 New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
 ```
 
 コマンドプロンプト:
 
 ```bat
-set "BACKUP_ROOT=C:\CodexBackups\wsl-to-windows"
+set "BACKUP_ROOT=C:\path\to\codex-backups\wsl-to-windows"
 if not exist "%BACKUP_ROOT%" mkdir "%BACKUP_ROOT%"
 ```
 
 WSLシェル:
 
 ```sh
-BACKUP_ROOT=/mnt/c/CodexBackups/wsl-to-windows
+BACKUP_ROOT=/mnt/c/path/to/codex-backups/wsl-to-windows
 mkdir -p "$BACKUP_ROOT"
 ```
 
@@ -264,24 +264,24 @@ WSL用DBの `_sqlx_migrations.checksum` は書き換えず、Windowsネイティ
 
 ```sh
 CODEX_HOME=/mnt/c/Users/WINDOWS_USERNAME/.codex
-RECOVERY_WORKDIR=/mnt/c/src/recover_codex_sessions
-BACKUP_ROOT=/mnt/c/src/.codex_bak
+RECOVERY_WORKDIR=/mnt/c/path/to/recover_codex_sessions
+BACKUP_ROOT=/mnt/c/path/to/codex-backups
 ```
 
 PowerShellでは、同じパスをWindows形式で設定します。
 
 ```powershell
 $CodexHome = Join-Path $env:USERPROFILE ".codex"
-$RecoveryWorkdir = "C:\src\recover_codex_sessions"
-$BackupRoot = "C:\src\.codex_bak"
+$RecoveryWorkdir = "C:\path\to\recover_codex_sessions"
+$BackupRoot = "C:\path\to\codex-backups"
 ```
 
 コマンドプロンプトでは、次の環境変数を設定します。
 
 ```bat
 set "CODEX_HOME=%USERPROFILE%\.codex"
-set "RECOVERY_WORKDIR=C:\src\recover_codex_sessions"
-set "BACKUP_ROOT=C:\src\.codex_bak"
+set "RECOVERY_WORKDIR=C:\path\to\recover_codex_sessions"
+set "BACKUP_ROOT=C:\path\to\codex-backups"
 ```
 
 Windows側のコマンド例はPython Launcherの `py -3` を使用します。
@@ -979,8 +979,8 @@ DBだけを直すと、JSONL側の古い値で上書きされます。JSONLとDB
 UI補助インデックスが古いと表示やプロジェクト紐付けが崩れる可能性があります。
 
 WindowsネイティブエージェントとWSLエージェントを切り替える場合も同じです。
-同じ物理ディレクトリでも、Windows側では `C:\src\project`、WSL側では
-`/mnt/c/src/project` と表記されます。どちらか一方の形式に全層を揃えないと、
+同じ物理ディレクトリでも、Windows側では `C:\path\to\project`、WSL側では
+`/mnt/c/path/to/project` と表記されます。どちらか一方の形式に全層を揃えないと、
 DB上には履歴があり `session_index.jsonl` にもIDがあるのに、UIのプロジェクト
 履歴からは外れます。
 

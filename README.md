@@ -95,12 +95,12 @@ py -3 scripts\repair_ui_indexes.py dry-run `
 Codex home自身やその配下を指定しないでください。
 
 ```powershell
-$BackupRoot = "C:\CodexBackups\wsl-to-windows"
+$BackupRoot = "C:\path\to\codex-backups\wsl-to-windows"
 New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
 ```
 
 ```sh
-BACKUP_ROOT=/mnt/c/CodexBackups/wsl-to-windows
+BACKUP_ROOT=/mnt/c/path/to/codex-backups/wsl-to-windows
 mkdir -p "$BACKUP_ROOT"
 ```
 
