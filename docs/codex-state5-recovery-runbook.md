@@ -86,6 +86,113 @@ python3 .tmp/migrate_windows_codex_home_to_wsl.py apply --source-home /mnt/c/Use
 DBを書き換えるため、`apply` はCodex appが完全終了している状態でのみ実行
 してください。
 
+## バックアップルートの役割
+
+各スクリプトの `--backup-root` は、`apply` が変更前のデータを保存する出力先です。
+復旧対象を検索する入力ディレクトリではなく、指定先のファイルが自動的にライブ環境へ反映されることもありません。
+`dry-run` は変更予定を表示するだけで、バックアップルートを作成または更新しません。
+
+### 指定するディレクトリ
+
+バックアップルートには、次の条件を満たすディレクトリを指定します。
+
+- Codex homeの外側にある。
+- 実行ユーザーが読み書きできる。
+- DBと変更対象ファイルを保存できる空き容量がある。
+- どの端末、Codex home、切り替え作業のバックアップか識別できる。
+
+`%CODEX_HOME%` 自身や、その配下の `sessions` などを指定してはいけません。
+ライブデータと退避データを取り違えたり、後続のスキャンやコピーの対象に含めたりする原因になります。
+
+`apply` の前にディレクトリを作成します。
+一部のスクリプトは親ディレクトリが存在することを前提とするため、この手順は省略しません。
+
+PowerShell:
+
+```powershell
+$BackupRoot = "C:\CodexBackups\wsl-to-windows"
+New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
+```
+
+コマンドプロンプト:
+
+```bat
+set "BACKUP_ROOT=C:\CodexBackups\wsl-to-windows"
+if not exist "%BACKUP_ROOT%" mkdir "%BACKUP_ROOT%"
+```
+
+WSLシェル:
+
+```sh
+BACKUP_ROOT=/mnt/c/CodexBackups/wsl-to-windows
+mkdir -p "$BACKUP_ROOT"
+```
+
+同じ切り替え作業の各スクリプトには、同じバックアップルートを指定できます。
+ただし、各スクリプトは個別の実行時刻でバックアップを作るため、ディレクトリ全体が単一時点のスナップショットになるわけではありません。
+一括して元の状態へ戻せる基準点が必要な場合は、後述の切り替え前バックアップも作成します。
+
+### `apply` が保存するデータ
+
+代表的な保存内容は次のとおりです。
+タイムスタンプは実際の実行日時へ置き換わります。
+
+```text
+BACKUP_ROOT/
+├── rollout-session-meta-backup-windows-YYYYMMDD-HHMMSS/
+│   └── sessions/YYYY/MM/DD/rollout-SESSION_ID.jsonl
+├── state_5.live-before-cwd-normalize-windows-YYYYMMDD-HHMMSS.sqlite
+├── session_index.before-ui-index-repair-windows-YYYYMMDD-HHMMSS.jsonl
+├── codex-global-state.before-ui-index-repair-windows-YYYYMMDD-HHMMSS.json
+├── state_5.sqlite.before-wsl-home-migrate-YYYYMMDD-HHMMSS
+├── state_5.sqlite-wal.before-wsl-home-migrate-YYYYMMDD-HHMMSS
+├── state_5.sqlite-shm.before-wsl-home-migrate-YYYYMMDD-HHMMSS
+├── session_index.jsonl.before-wsl-home-migrate-YYYYMMDD-HHMMSS
+└── .codex-global-state.json.before-wsl-home-migrate-YYYYMMDD-HHMMSS
+```
+
+各スクリプトの保存動作は次のとおりです。
+
+| スクリプト | 保存対象 | 保存単位と注意点 |
+| --- | --- | --- |
+| `repair_rollout_session_meta.py` | 実際に変更するrollout JSONL | Codex homeからの相対パスを保った専用ディレクトリへ原本をコピーする |
+| `normalize_history_cwd.py` | 更新直前のライブDB | SQLite Backup APIで一貫した `state_5.sqlite` スナップショットを1ファイル作成する |
+| `repair_ui_indexes.py` | `session_index.jsonl` と `.codex-global-state.json` | UI補助状態を書き換える直前の原本を個別にコピーする |
+| `migrate_windows_codex_home_to_wsl.py` | 変更前の移行先DB、WAL、SHM、UI補助状態 | 存在する移行先ファイルだけを個別にコピーする |
+
+変更対象が0件の場合は、そのスクリプトのバックアップが作成されないことがあります。
+`migrate_windows_codex_home_to_wsl.py` が移行元からコピーするセッションJSONLは、バックアップルートではなく移行先の `sessions` へ直接追加されます。
+この移行を元に戻す可能性がある場合は、移行先Codex homeの一式バックアップも事前に作成してください。
+
+### バックアップに含まれる機密データ
+
+バックアップには、次の情報が含まれる場合があります。
+
+- rollout JSONL内の会話内容、ツール実行記録、作業ディレクトリ
+- DB内のスレッド名、先頭メッセージ、rolloutパス、アーカイブ状態
+- `session_index.jsonl` 内のスレッドIDと表示名
+- `.codex-global-state.json` 内のワークスペースルートとUI状態
+
+バックアップルートはCodex homeと同等の機密データとして扱います。
+Gitへ追加せず、公開リポジトリ、共有フォルダー、一般利用のクラウド同期先へ不用意に置かないでください。
+
+### 実行後に行う操作
+
+`apply` の出力に表示されたバックアップパスを、実行したコマンドとともに記録します。
+検証が終わるまではバックアップを編集、移動、改名しません。
+スクリプトはバックアップの自動復元、自動削除、自動ローテーションを行いません。
+
+ロールバック時はCodexを完全終了し、同じスクリプトと同じ実行時刻に対応するファイルを戻します。
+rollout JSONLは、バックアップディレクトリ内の相対パスと同じ位置へ戻します。
+DBスナップショットを戻す場合は、ライブDB、WAL、SHMを別の場所へ退避してから `state_5.sqlite` として配置し、古いsidecarを組み合わせません。
+UI補助状態は、同じ実行に対応する `session_index.jsonl` と `.codex-global-state.json` を対として戻します。
+
+WSL版のmigration checksumを持つDBをWindowsネイティブ版へ戻すなど、実行環境と異なる形式のDBを直接復元してはいけません。
+WSLからWindowsネイティブへの切り替え全体を戻す場合は、各スクリプトの個別バックアップではなく、後述の `wsl-before-windows-native-...` を基準にします。
+
+バックアップは、少なくとも切り替え後のCodex再起動、履歴表示、新規スレッド作成、再起動後の再確認が成功するまで保持します。
+その後の削除や長期保管は、組織の保持方針に従って手動で行います。
+
 ## 症状
 
 - Codex 起動時に SQLite migration checksum エラーが出る。

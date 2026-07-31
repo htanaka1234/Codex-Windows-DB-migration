@@ -85,6 +85,40 @@ py -3 scripts\repair_ui_indexes.py dry-run `
 
 `apply` の実行順序は、[WSLからWindowsネイティブへ切り替える場合](docs/codex-state5-recovery-runbook.md#wslからwindowsネイティブへ切り替える場合)に従います。
 
+## `--backup-root` の役割
+
+`--backup-root` は、`apply` が変更前のファイルやSQLiteスナップショットを保存する出力先です。
+復旧対象を検索する入力ディレクトリではありません。
+`dry-run` は、このディレクトリへファイルを書き込みません。
+
+実行前に、Codex homeの外側へ書き込み可能な専用ディレクトリを作成してください。
+Codex home自身やその配下を指定しないでください。
+
+```powershell
+$BackupRoot = "C:\CodexBackups\wsl-to-windows"
+New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
+```
+
+```sh
+BACKUP_ROOT=/mnt/c/CodexBackups/wsl-to-windows
+mkdir -p "$BACKUP_ROOT"
+```
+
+保存されるデータは、実行するスクリプトによって異なります。
+
+| スクリプト | `apply` が保存する主なデータ |
+| --- | --- |
+| `repair_rollout_session_meta.py` | 変更対象となるrollout JSONLの原本 |
+| `normalize_history_cwd.py` | 更新直前の `state_5.sqlite` の一貫したスナップショット |
+| `repair_ui_indexes.py` | 更新前の `session_index.jsonl` と `.codex-global-state.json` |
+| `migrate_windows_codex_home_to_wsl.py` | 変更前の移行先DB、sidecar、UI補助状態 |
+
+バックアップには会話内容、スレッド名、ローカルパスなどが含まれる場合があります。
+Codex homeと同等の機密データとして扱い、Gitへ追加したり不用意に共有したりしないでください。
+スクリプトはバックアップを自動復元、自動削除、自動ローテーションしません。
+
+ファイル名、復元方法、保持期間、切り替え前に手動作成する一式バックアップとの違いは、[バックアップルートの役割](docs/codex-state5-recovery-runbook.md#バックアップルートの役割)を参照してください。
+
 ## 主要スクリプト
 
 | スクリプト | 役割 |
