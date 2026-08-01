@@ -80,54 +80,108 @@ def desired_thread_source(source):
     return None
 
 
+def normalize_structured_paths(value, target_style: str, wsl_distro: str | None, location: str, changes):
+    """Normalize typed path fields without rewriting paths embedded in free text."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_location = f"{location}.{key}" if location else key
+            if key == "cwd" and isinstance(child, str):
+                new_value = normalize_cwd(child, target_style, wsl_distro)
+                if new_value != child:
+                    value[key] = new_value
+                    changes.append({"field": child_location, "old": child, "new": new_value})
+            elif key in {"writable_roots", "writableRoots"} and isinstance(child, list):
+                for index, item in enumerate(child):
+                    if not isinstance(item, str):
+                        continue
+                    new_value = normalize_cwd(item, target_style, wsl_distro)
+                    if new_value != item:
+                        child[index] = new_value
+                        changes.append({
+                            "field": f"{child_location}[{index}]",
+                            "old": item,
+                            "new": new_value,
+                        })
+            else:
+                normalize_structured_paths(child, target_style, wsl_distro, child_location, changes)
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            normalize_structured_paths(child, target_style, wsl_distro, f"{location}[{index}]", changes)
+
+
 def analyze_file(path: Path, target_style: str, wsl_distro: str | None = None):
-    raw = path.read_bytes()
-    newline = raw.find(b"\n")
-    if newline < 0:
-        first = raw
-        rest = b""
-    else:
-        first = raw[:newline]
-        rest = raw[newline + 1 :]
-    try:
-        obj = json.loads(first.decode("utf-8"))
-    except Exception as exc:
-        return None, {"path": str(path), "error": str(exc)}
-    if obj.get("type") != "session_meta" or not isinstance(obj.get("payload"), dict):
-        return None, None
+    raw_lines = path.read_bytes().splitlines(keepends=True)
+    output = []
+    changes = []
+    errors = []
+    thread_id = None
+    source = None
 
-    payload = obj["payload"]
-    changes = {}
+    for line_number, raw_line in enumerate(raw_lines, 1):
+        content = raw_line.rstrip(b"\r\n")
+        line_ending = raw_line[len(content) :]
+        if not content:
+            output.append(raw_line)
+            continue
+        try:
+            obj = json.loads(content.decode("utf-8"))
+        except Exception as exc:
+            errors.append({
+                "path": str(path),
+                "line": line_number,
+                "error": str(exc),
+                "blocking": True,
+            })
+            output.append(raw_line)
+            continue
 
-    cwd = payload.get("cwd")
-    try:
-        new_cwd = normalize_cwd(cwd, target_style, wsl_distro) if isinstance(cwd, str) else cwd
-    except PathConversionError as exc:
-        return None, {"path": str(path), "cwd": cwd, "error": str(exc), "blocking": True}
-    if new_cwd != cwd:
-        changes["cwd"] = {"old": cwd, "new": new_cwd}
+        line_changes = []
+        try:
+            normalize_structured_paths(obj, target_style, wsl_distro, "", line_changes)
+        except PathConversionError as exc:
+            errors.append({
+                "path": str(path),
+                "line": line_number,
+                "error": str(exc),
+                "blocking": True,
+            })
+            output.append(raw_line)
+            continue
 
-    wanted_source = desired_thread_source(payload.get("source"))
-    current_source = payload.get("thread_source")
-    if wanted_source and current_source != wanted_source:
-        changes["thread_source"] = {"old": current_source, "new": wanted_source}
+        payload = obj.get("payload")
+        if obj.get("type") == "session_meta" and isinstance(payload, dict):
+            thread_id = thread_id or payload.get("id")
+            source = source or payload.get("source")
+            wanted_source = desired_thread_source(payload.get("source"))
+            current_source = payload.get("thread_source")
+            if wanted_source and current_source != wanted_source:
+                payload["thread_source"] = wanted_source
+                line_changes.append({
+                    "field": "payload.thread_source",
+                    "old": current_source,
+                    "new": wanted_source,
+                })
+
+        if line_changes:
+            for change in line_changes:
+                change["line"] = line_number
+            changes.extend(line_changes)
+            output.append(
+                json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                + (line_ending or b"\n")
+            )
+        else:
+            output.append(raw_line)
 
     if not changes:
-        return None, None
-
+        return None, errors
     return {
         "path": path,
-        "obj": obj,
-        "rest": rest,
+        "content": b"".join(output),
         "changes": changes,
-        "id": payload.get("id"),
-        "source": payload.get("source"),
-    }, None
-
-
-def write_file(path: Path, obj, rest: bytes):
-    first = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
-    path.write_bytes(first + rest)
+        "id": thread_id,
+        "source": source,
+    }, errors
 
 
 def main() -> int:
@@ -178,15 +232,16 @@ def main() -> int:
     if target_style not in {"windows", "wsl"}:
         raise SystemExit("--target-style must be windows, wsl, or auto")
 
-    sessions = codex_home / "sessions"
-
     candidates = []
     errors = []
-    session_files = sorted(sessions.glob("**/rollout-*.jsonl"))
+    session_files = []
+    for directory in (codex_home / "sessions", codex_home / "archived_sessions"):
+        if directory.exists():
+            session_files.extend(directory.glob("**/rollout-*.jsonl"))
+    session_files = sorted(session_files)
     for path in session_files:
-        candidate, error = analyze_file(path, target_style, wsl_distro)
-        if error:
-            errors.append(error)
+        candidate, file_errors = analyze_file(path, target_style, wsl_distro)
+        errors.extend(file_errors)
         if candidate:
             candidates.append(candidate)
 
@@ -197,13 +252,15 @@ def main() -> int:
         "wsl_distro": wsl_distro,
         "session_files_scanned": len(session_files),
         "files_to_update": len(candidates),
+        "structured_changes": sum(len(item["changes"]) for item in candidates),
         "errors": errors[:20],
         "sample": [
             {
                 "path": str(item["path"]),
                 "id": item["id"],
                 "source": item["source"],
-                "changes": item["changes"],
+                "change_count": len(item["changes"]),
+                "changes": item["changes"][:20],
             }
             for item in candidates[:20]
         ],
@@ -226,10 +283,7 @@ def main() -> int:
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
 
-        payload = item["obj"]["payload"]
-        for key, change in item["changes"].items():
-            payload[key] = change["new"]
-        write_file(src, item["obj"], item["rest"])
+        src.write_bytes(item["content"])
 
     print(json.dumps({
         "applied": {

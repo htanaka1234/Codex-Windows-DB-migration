@@ -58,6 +58,8 @@ def windows_path_problem(value: str) -> str | None:
     normalized = strip_long_windows_prefix(value).replace("/", "\\")
     if re.match(r"^[A-Za-z]:\\mnt\\[A-Za-z](?:\\|$)", normalized, re.IGNORECASE):
         return "path looks like a WSL /mnt path incorrectly nested below a Windows drive"
+    if re.search(r"\\[A-Za-z]:\\", normalized[2:]):
+        return "path contains a second Windows drive specification"
     if not is_windows_absolute_path(value):
         return "path is not an absolute Windows drive or UNC path"
     return None
@@ -69,6 +71,9 @@ def to_windows_path(value: str, *, long_prefix: bool, wsl_distro: str | None = N
         raise PathConversionError("empty cwd cannot be converted to an absolute Windows path")
 
     stripped = strip_long_windows_prefix(value)
+    embedded_drives = list(re.finditer(r"[A-Za-z]:[\\/]", stripped))
+    if embedded_drives and embedded_drives[-1].start() > 0:
+        stripped = stripped[embedded_drives[-1].start() :]
     posix_native = stripped.startswith("/") and not stripped.startswith("//")
     raw = _standard_unc(stripped)
     slash_value = raw.replace("\\", "/")

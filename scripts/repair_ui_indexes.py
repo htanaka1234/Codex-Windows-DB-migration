@@ -6,6 +6,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from codex_global_state_paths import normalize_global_state
 from codex_path_styles import PathConversionError, strip_long_windows_prefix, to_windows_path, to_wsl_path
 
 
@@ -176,37 +177,13 @@ def main() -> int:
         state = json.loads(global_state.read_text(encoding="utf-8"))
     else:
         state = {}
-    new_state = json.loads(json.dumps(state))
-    conversion_errors = []
-    for key in ("active-workspace-roots", "electron-saved-workspace-roots", "project-order"):
-        if isinstance(new_state.get(key), list):
-            seen = set()
-            values = []
-            for item in new_state[key]:
-                try:
-                    value = norm_root(item, target_style, wsl_distro) if isinstance(item, str) else item
-                except PathConversionError as exc:
-                    conversion_errors.append({"source": key, "value": item, "error": str(exc)})
-                    value = item
-                dedupe = value.lower() if isinstance(value, str) else repr(value)
-                if dedupe not in seen:
-                    seen.add(dedupe)
-                    values.append(value)
-            new_state[key] = values
+    new_state, global_state_changes, conversion_errors = normalize_global_state(
+        state,
+        target_style,
+        wsl_distro,
+    )
 
     hints = dict(new_state.get("thread-workspace-root-hints", {}))
-    for thread_id, value in list(hints.items()):
-        if not isinstance(value, str):
-            continue
-        try:
-            hints[thread_id] = norm_root(value, target_style, wsl_distro)
-        except PathConversionError as exc:
-            conversion_errors.append({
-                "source": "thread-workspace-root-hints",
-                "thread_id": thread_id,
-                "value": value,
-                "error": str(exc),
-            })
     for thread in threads:
         try:
             hints[thread["id"]] = norm_root(thread["cwd"], target_style, wsl_distro)
@@ -231,6 +208,7 @@ def main() -> int:
         "global_state_project_order_new": new_state.get("project-order"),
         "thread_workspace_root_hints_old_count": len(state.get("thread-workspace-root-hints", {})),
         "thread_workspace_root_hints_new_count": len(hints),
+        "global_state_path_changes": global_state_changes[:50],
         "cwd_conversion_errors": conversion_errors[:20],
     }
     print(json.dumps({"plan": diff}, ensure_ascii=False, indent=2))
@@ -243,10 +221,17 @@ def main() -> int:
         return 0
 
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_root.mkdir(parents=True, exist_ok=True)
     index_backup = backup_root / f"session_index.before-ui-index-repair-{target_style}-{ts}.jsonl"
     global_backup = backup_root / f"codex-global-state.before-ui-index-repair-{target_style}-{ts}.json"
-    shutil.copy2(session_index, index_backup)
-    shutil.copy2(global_state, global_backup)
+    if session_index.exists():
+        shutil.copy2(session_index, index_backup)
+    else:
+        index_backup = None
+    if global_state.exists():
+        shutil.copy2(global_state, global_backup)
+    else:
+        global_backup = None
 
     write_index(session_index, new_index)
     tmp_state = global_state.with_suffix(".json.tmp-codex-restore")
@@ -255,8 +240,8 @@ def main() -> int:
 
     print(json.dumps({
         "applied": {
-            "session_index_backup": str(index_backup),
-            "global_state_backup": str(global_backup),
+            "session_index_backup": str(index_backup) if index_backup else None,
+            "global_state_backup": str(global_backup) if global_backup else None,
             "session_index_rows": len(new_index),
             "thread_workspace_root_hints": len(hints),
         }

@@ -8,7 +8,7 @@ Codex DesktopでWindowsネイティブエージェントとWSLエージェント
 
 - `state_5.sqlite` の `integrity_check` と `quick_check`
 - Windows版とWSL版のmigration checksum不一致の調査
-- rollout JSONLに保存された `cwd` と `thread_source` の正規化
+- rollout JSONL全体に保存された構造化 `cwd`、書き込みルート、`thread_source` の正規化
 - 長形式UNCを壊さないWindows絶対パス変換と検証
 - `config.toml` の `agents.<role>.config_file` の監査とOS間変換
 - `state_5.sqlite` の履歴メタデータの正規化
@@ -126,6 +126,7 @@ mkdir -p "$BACKUP_ROOT"
 ```
 
 保存されるデータは、実行するスクリプトによって異なります。
+切り替え前の一式バックアップでは、`state_5.sqlite*`、`logs_2.sqlite*`、`goals_1.sqlite*` を同じ時点で保存してください。
 
 | スクリプト | `apply` が保存する主なデータ |
 | --- | --- |
@@ -146,7 +147,7 @@ Codex homeと同等の機密データとして扱い、Gitへ追加したり不�
 | スクリプト | 役割 |
 | --- | --- |
 | `current_history_visibility_audit.py` | DB、rollout JSONL、UIインデックスの現在状態を監査する |
-| `repair_rollout_session_meta.py` | rollout JSONLの `cwd` と `thread_source` を正規化する |
+| `repair_rollout_session_meta.py` | 通常履歴とアーカイブ履歴のrollout JSONL全体にある構造化パスと `thread_source` を正規化する |
 | `normalize_history_cwd.py` | DB内の履歴メタデータをWindows形式またはWSL形式へ揃える |
 | `repair_ui_indexes.py` | `session_index.jsonl` とグローバルUI状態を再構築する |
 | `repair_agent_config_paths.py` | `agents.<role>.config_file` の不整合な絶対パスを修復する |
@@ -179,9 +180,9 @@ python3 -m unittest discover -s tests -v
 
 ## 安全上の注意
 
-- Codexの稼働中に `state_5.sqlite`、WAL、SHMを移動または置換しないでください。
+- Codexの稼働中に `state_5.sqlite`、`logs_2.sqlite`、`goals_1.sqlite` と各WAL、SHMを移動または置換しないでください。
 - `_sqlx_migrations.checksum` を推測で更新しないでください。
-- `apply` の前にCodex home、`sessions`、DB、WAL、SHM、UI補助状態を退避してください。
+- `apply` の前にCodex home、`sessions`、`archived_sessions`、3種類のDB本体と各WAL、SHM、UI補助状態を退避してください。
 - Windows版とWSL版で単一の `state_5.sqlite` を共有すると、改行コード差によるchecksum不一致が再発する場合があります。
 - SQLite、JSONL、Codexのグローバル状態、復旧バックアップはGitへ追加しないでください。
 

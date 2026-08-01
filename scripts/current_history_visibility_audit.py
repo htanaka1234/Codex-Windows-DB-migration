@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from codex_agent_config import audit_agent_config
+from codex_global_state_paths import iter_global_state_paths, looks_like_path
 from codex_path_styles import (
     PathConversionError,
     strip_long_windows_prefix,
@@ -99,6 +100,8 @@ def load_json(path: Path):
 
 def load_session_index(path: Path):
     out = []
+    if not path.exists():
+        return out
     with path.open("r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
@@ -174,9 +177,10 @@ def inspect_global_state(global_state: Path, live_rows, target_style: str, wsl_d
         return []
     state = load_json(global_state)
     saved = []
-    problems = []
     for key in ("active-workspace-roots", "electron-saved-workspace-roots", "project-order"):
         for value in state.get(key, []):
+            if not isinstance(value, str) or not looks_like_path(value):
+                continue
             audit = path_audit(value, target_style, wsl_distro)
             saved.append({
                 "source": key,
@@ -184,8 +188,6 @@ def inspect_global_state(global_state: Path, live_rows, target_style: str, wsl_d
                 "normalized": audit["normalized_for_target"],
                 "path_problem": audit.get("problem"),
             })
-            if audit.get("problem"):
-                problems.append({"source": key, "value": value, "problem": audit["problem"]})
     counts = []
     for item in saved:
         exact = sum(
@@ -214,23 +216,26 @@ def inspect_global_state(global_state: Path, live_rows, target_style: str, wsl_d
                     normalized += 1
         counts.append({**item, "exact_visible_user_like": exact, "normalized_visible_user_like": normalized})
     print_json("workspace_root_match_counts", counts)
-    hints = state.get("thread-workspace-root-hints", {})
-    hint_audits = []
-    for thread_id, value in hints.items():
-        if not isinstance(value, str):
-            continue
+
+    problems = []
+    audits = []
+    for location, value in iter_global_state_paths(state):
         audit = path_audit(value, target_style, wsl_distro)
+        item = {
+            "source": location,
+            "value": value,
+            "normalized": audit.get("normalized_for_target"),
+            "problem": audit.get("problem"),
+        }
+        audits.append(item)
         if audit.get("problem"):
-            problem = {"source": "thread-workspace-root-hints", "thread_id": thread_id, "value": value, "problem": audit["problem"]}
-            problems.append(problem)
-            hint_audits.append(problem)
-    print_json("thread_workspace_root_hints", {
-        "count": len(hints),
-        "sample": dict(list(hints.items())[:10]),
-        "path_problems": hint_audits[:20],
+            problems.append(item)
+    print_json("global_state_typed_paths", {
+        "count": len(audits),
+        "problem_count": len(problems),
+        "problems": problems[:50],
     })
     return problems
-
 
 def inspect_session_index(session_index: Path, source_db: Path | None, live_rows):
     index_rows = load_session_index(session_index)
@@ -261,6 +266,48 @@ def inspect_session_index(session_index: Path, source_db: Path | None, live_rows
     if source_ids:
         missing = sorted(source_ids - index_ids)
         print_json("source_ids_missing_from_session_index_sample", missing[:15])
+
+
+def inspect_rollouts(codex_home: Path, target_style: str, wsl_distro: str | None = None):
+    from repair_rollout_session_meta import analyze_file
+
+    files = []
+    for directory in (codex_home / "sessions", codex_home / "archived_sessions"):
+        if directory.exists():
+            files.extend(directory.glob("**/rollout-*.jsonl"))
+    problems = []
+    parse_errors = []
+    files_to_update = 0
+    structured_path_changes = 0
+    for path in sorted(files):
+        candidate, errors = analyze_file(path, target_style, wsl_distro)
+        parse_errors.extend(errors)
+        if not candidate:
+            continue
+        path_changes = [change for change in candidate["changes"] if change["field"] != "payload.thread_source"]
+        if not path_changes:
+            continue
+        files_to_update += 1
+        structured_path_changes += len(path_changes)
+        for change in path_changes:
+            problems.append({
+                "source": str(path),
+                "line": change["line"],
+                "field": change["field"],
+                "value": change["old"],
+                "normalized": change["new"],
+                "problem": "structured rollout path is not normalized for the target",
+            })
+    for error in parse_errors:
+        problems.append({**error, "source": error.get("path"), "problem": error["error"]})
+    print_json("rollout_structured_paths", {
+        "files_scanned": len(files),
+        "files_to_update": files_to_update,
+        "structured_path_changes": structured_path_changes,
+        "parse_errors": parse_errors[:20],
+        "problems": problems[:50],
+    })
+    return problems
 
 
 def inspect_logs_db(log_db: Path):
@@ -331,6 +378,7 @@ def main() -> int:
 
     live_rows, path_problems = inspect_state_db(state_db, target_style, wsl_distro)
     path_problems.extend(inspect_global_state(global_state, live_rows, target_style, wsl_distro))
+    path_problems.extend(inspect_rollouts(codex_home, target_style, wsl_distro))
     inspect_session_index(session_index, source_db, live_rows)
     inspect_logs_db(log_db)
     config_audit = audit_agent_config(config_path, target_style, wsl_distro)

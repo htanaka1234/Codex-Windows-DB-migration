@@ -7,7 +7,7 @@
 `state_5.sqlite` だけを直しても復旧は完了しません。Codex は
 `%USERPROFILE%\.codex\sessions\**\rollout-*.jsonl` を再スキャンして
 `state_5.sqlite` のスレッドメタデータを再構築または補修します。そのため、
-JSONL 側の `session_meta` が古い形式のままだと、DBを直しても再起動後に
+JSONL側の `session_meta` や後続イベントの構造化パスが古い形式のままだと、DBを直しても再起動後に
 古い値へ戻されます。
 
 また、Codex app のエージェントを Windows ネイティブから WSL へ切り替えた
@@ -142,7 +142,8 @@ mkdir -p "$BACKUP_ROOT"
 ```text
 BACKUP_ROOT/
 ├── rollout-session-meta-backup-windows-YYYYMMDD-HHMMSS/
-│   └── sessions/YYYY/MM/DD/rollout-SESSION_ID.jsonl
+│   ├── sessions/YYYY/MM/DD/rollout-SESSION_ID.jsonl
+│   └── archived_sessions/rollout-SESSION_ID.jsonl
 ├── state_5.live-before-cwd-normalize-windows-YYYYMMDD-HHMMSS.sqlite
 ├── session_index.before-ui-index-repair-windows-YYYYMMDD-HHMMSS.jsonl
 ├── codex-global-state.before-ui-index-repair-windows-YYYYMMDD-HHMMSS.json
@@ -365,7 +366,7 @@ Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like 
 tasklist | findstr /i codex
 ```
 
-Codexの稼働中に `state_5.sqlite-wal` または `state_5.sqlite-shm` を移動すると、未チェックポイントの更新を失う可能性があります。
+Codexの稼働中に3種類のDBのWALまたはSHMを移動すると、未チェックポイントの更新を失う可能性があります。
 
 ### 3. Windows形式へ変換する前の全状態を保存する
 
@@ -377,10 +378,11 @@ WSLシェル:
 STAMP=$(date +%Y%m%d-%H%M%S)
 SWITCH_BACKUP="$BACKUP_ROOT/wsl-before-windows-native-$STAMP"
 mkdir -p "$SWITCH_BACKUP"
-cp -a "$CODEX_HOME/state_5.sqlite" "$SWITCH_BACKUP/"
-test ! -e "$CODEX_HOME/state_5.sqlite-wal" || cp -a "$CODEX_HOME/state_5.sqlite-wal" "$SWITCH_BACKUP/"
-test ! -e "$CODEX_HOME/state_5.sqlite-shm" || cp -a "$CODEX_HOME/state_5.sqlite-shm" "$SWITCH_BACKUP/"
+for Name in state_5.sqlite state_5.sqlite-wal state_5.sqlite-shm logs_2.sqlite logs_2.sqlite-wal logs_2.sqlite-shm goals_1.sqlite goals_1.sqlite-wal goals_1.sqlite-shm; do
+  test ! -e "$CODEX_HOME/$Name" || cp -a "$CODEX_HOME/$Name" "$SWITCH_BACKUP/"
+done
 cp -a "$CODEX_HOME/sessions" "$SWITCH_BACKUP/"
+test ! -e "$CODEX_HOME/archived_sessions" || cp -a "$CODEX_HOME/archived_sessions" "$SWITCH_BACKUP/"
 test ! -e "$CODEX_HOME/session_index.jsonl" || cp -a "$CODEX_HOME/session_index.jsonl" "$SWITCH_BACKUP/"
 test ! -e "$CODEX_HOME/.codex-global-state.json" || cp -a "$CODEX_HOME/.codex-global-state.json" "$SWITCH_BACKUP/"
 test ! -e "$CODEX_HOME/config.toml" || cp -a "$CODEX_HOME/config.toml" "$SWITCH_BACKUP/"
@@ -392,14 +394,22 @@ PowerShell:
 $Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $SwitchBackup = Join-Path $BackupRoot "wsl-before-windows-native-$Stamp"
 New-Item -ItemType Directory -Path $SwitchBackup -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $CodexHome "state_5.sqlite") -Destination $SwitchBackup
-foreach ($Name in @("state_5.sqlite-wal", "state_5.sqlite-shm", "session_index.jsonl", ".codex-global-state.json", "config.toml")) {
+foreach ($Name in @(
+    "state_5.sqlite", "state_5.sqlite-wal", "state_5.sqlite-shm",
+    "logs_2.sqlite", "logs_2.sqlite-wal", "logs_2.sqlite-shm",
+    "goals_1.sqlite", "goals_1.sqlite-wal", "goals_1.sqlite-shm",
+    "session_index.jsonl", ".codex-global-state.json", "config.toml"
+)) {
     $Source = Join-Path $CodexHome $Name
     if (Test-Path -LiteralPath $Source) {
         Copy-Item -LiteralPath $Source -Destination $SwitchBackup
     }
 }
 Copy-Item -LiteralPath (Join-Path $CodexHome "sessions") -Destination (Join-Path $SwitchBackup "sessions") -Recurse
+$ArchivedSessions = Join-Path $CodexHome "archived_sessions"
+if (Test-Path -LiteralPath $ArchivedSessions) {
+    Copy-Item -LiteralPath $ArchivedSessions -Destination (Join-Path $SwitchBackup "archived_sessions") -Recurse
+}
 ```
 
 コマンドプロンプトでは、`STAMP` を実行時刻に置き換えてから実行します。
@@ -408,17 +418,17 @@ Copy-Item -LiteralPath (Join-Path $CodexHome "sessions") -Destination (Join-Path
 set "STAMP=YYYYMMDD-HHMMSS"
 set "SWITCH_BACKUP=%BACKUP_ROOT%\wsl-before-windows-native-%STAMP%"
 mkdir "%SWITCH_BACKUP%"
-copy /y "%CODEX_HOME%\state_5.sqlite" "%SWITCH_BACKUP%\"
-if exist "%CODEX_HOME%\state_5.sqlite-wal" copy /y "%CODEX_HOME%\state_5.sqlite-wal" "%SWITCH_BACKUP%\"
-if exist "%CODEX_HOME%\state_5.sqlite-shm" copy /y "%CODEX_HOME%\state_5.sqlite-shm" "%SWITCH_BACKUP%\"
+for %F in (state_5.sqlite state_5.sqlite-wal state_5.sqlite-shm logs_2.sqlite logs_2.sqlite-wal logs_2.sqlite-shm goals_1.sqlite goals_1.sqlite-wal goals_1.sqlite-shm) do if exist "%CODEX_HOME%\%F" copy /y "%CODEX_HOME%\%F" "%SWITCH_BACKUP%\"
 if exist "%CODEX_HOME%\session_index.jsonl" copy /y "%CODEX_HOME%\session_index.jsonl" "%SWITCH_BACKUP%\"
 if exist "%CODEX_HOME%\.codex-global-state.json" copy /y "%CODEX_HOME%\.codex-global-state.json" "%SWITCH_BACKUP%\"
 if exist "%CODEX_HOME%\config.toml" copy /y "%CODEX_HOME%\config.toml" "%SWITCH_BACKUP%\"
 xcopy "%CODEX_HOME%\sessions" "%SWITCH_BACKUP%\sessions\" /E /I /H /K /Y
+if exist "%CODEX_HOME%\archived_sessions" xcopy "%CODEX_HOME%\archived_sessions" "%SWITCH_BACKUP%\archived_sessions\" /E /I /H /K /Y
 ```
 
 存在しない補助ファイルがある場合は、そのファイルのコピーだけを省略します。
-バックアップ先に `state_5.sqlite` と `sessions` が存在することを確認してから次へ進みます。
+`state_5.sqlite`、`logs_2.sqlite`、`goals_1.sqlite` は独立したSQLx migration履歴を持つため、Windowsネイティブ版に再生成させる場合は各DBの本体、WAL、SHMを同じ時点の一組として退避します。
+バックアップ先に3種類のDB本体と `sessions` が存在することを確認してから次へ進みます。
 
 ### 4. エージェント設定ファイルのパスを監査する
 
@@ -530,21 +540,25 @@ py -3 scripts\repair_rollout_session_meta.py apply --target-style windows --wsl-
 
 ### 6. WSL用DBをライブ位置から退避する
 
-Windowsネイティブ版にクリーンDBを作らせるため、DB本体とsidecarを同じバックアップディレクトリへ移します。
+Windowsネイティブ版にクリーンDBを作らせるため、`state_5.sqlite`、`logs_2.sqlite`、`goals_1.sqlite` と各sidecarを同じバックアップディレクトリへ移します。
 削除はしません。
 
 WSLシェル:
 
 ```sh
-test ! -e "$CODEX_HOME/state_5.sqlite" || mv "$CODEX_HOME/state_5.sqlite" "$SWITCH_BACKUP/state_5.sqlite.wsl-live"
-test ! -e "$CODEX_HOME/state_5.sqlite-wal" || mv "$CODEX_HOME/state_5.sqlite-wal" "$SWITCH_BACKUP/state_5.sqlite-wal.wsl-live"
-test ! -e "$CODEX_HOME/state_5.sqlite-shm" || mv "$CODEX_HOME/state_5.sqlite-shm" "$SWITCH_BACKUP/state_5.sqlite-shm.wsl-live"
+for Name in state_5.sqlite state_5.sqlite-wal state_5.sqlite-shm logs_2.sqlite logs_2.sqlite-wal logs_2.sqlite-shm goals_1.sqlite goals_1.sqlite-wal goals_1.sqlite-shm; do
+  test ! -e "$CODEX_HOME/$Name" || mv "$CODEX_HOME/$Name" "$SWITCH_BACKUP/$Name.wsl-live"
+done
 ```
 
 PowerShell:
 
 ```powershell
-foreach ($Name in @("state_5.sqlite", "state_5.sqlite-wal", "state_5.sqlite-shm")) {
+foreach ($Name in @(
+    "state_5.sqlite", "state_5.sqlite-wal", "state_5.sqlite-shm",
+    "logs_2.sqlite", "logs_2.sqlite-wal", "logs_2.sqlite-shm",
+    "goals_1.sqlite", "goals_1.sqlite-wal", "goals_1.sqlite-shm"
+)) {
     $Source = Join-Path $CodexHome $Name
     if (Test-Path -LiteralPath $Source) {
         Move-Item -LiteralPath $Source -Destination (Join-Path $SwitchBackup "$Name.wsl-live")
@@ -555,36 +569,36 @@ foreach ($Name in @("state_5.sqlite", "state_5.sqlite-wal", "state_5.sqlite-shm"
 コマンドプロンプト:
 
 ```bat
-if exist "%CODEX_HOME%\state_5.sqlite" move /y "%CODEX_HOME%\state_5.sqlite" "%SWITCH_BACKUP%\state_5.sqlite.wsl-live"
-if exist "%CODEX_HOME%\state_5.sqlite-wal" move /y "%CODEX_HOME%\state_5.sqlite-wal" "%SWITCH_BACKUP%\state_5.sqlite-wal.wsl-live"
-if exist "%CODEX_HOME%\state_5.sqlite-shm" move /y "%CODEX_HOME%\state_5.sqlite-shm" "%SWITCH_BACKUP%\state_5.sqlite-shm.wsl-live"
+for %F in (state_5.sqlite state_5.sqlite-wal state_5.sqlite-shm logs_2.sqlite logs_2.sqlite-wal logs_2.sqlite-shm goals_1.sqlite goals_1.sqlite-wal goals_1.sqlite-shm) do if exist "%CODEX_HOME%\%F" move /y "%CODEX_HOME%\%F" "%SWITCH_BACKUP%\%F.wsl-live"
 ```
 
-`%CODEX_HOME%` に `state_5.sqlite`、`state_5.sqlite-wal`、`state_5.sqlite-shm` が残っていないことを確認します。
+`%CODEX_HOME%` に3種類のDB本体とsidecarが残っていないことを確認します。
 
 ### 7. Windowsネイティブ版にクリーンDBを生成させる
 
 Codexのエージェント設定がWindowsネイティブであることを確認してから、Codexを一度起動します。
-ホーム画面またはプロジェクト画面まで到達し、`%CODEX_HOME%\state_5.sqlite` が新しく作成されたことを確認します。
+ホーム画面またはプロジェクト画面まで到達し、`%CODEX_HOME%` に `state_5.sqlite`、`logs_2.sqlite`、`goals_1.sqlite` が新しく作成されたことを確認します。
 
 その後、Codexを再び完全終了します。
 ここで生成されたDBは、Windowsネイティブ版が持つCRLF形式のmigrationチェックサムを正としています。
 
-PowerShellでは、完全終了後に次のコマンドが `True` を返すことを確認します。
+PowerShellでは、完全終了後に3行すべての `Exists` が `True` になることを確認します。
 
 ```powershell
-Test-Path -LiteralPath (Join-Path $CodexHome "state_5.sqlite")
+@("state_5.sqlite", "logs_2.sqlite", "goals_1.sqlite") | ForEach-Object {
+    [PSCustomObject]@{ Name = $_; Exists = Test-Path -LiteralPath (Join-Path $CodexHome $_) }
+}
 ```
 
 コマンドプロンプトでは、完全終了後に次のコマンドがファイル情報を返すことを確認します。
 
 ```bat
-dir "%CODEX_HOME%\state_5.sqlite"
+dir "%CODEX_HOME%\state_5.sqlite" "%CODEX_HOME%\logs_2.sqlite" "%CODEX_HOME%\goals_1.sqlite"
 ```
 
 この段階で再びchecksumエラーになる場合は、次のいずれかが残っています。
 
-- `state_5.sqlite` またはsidecarの退避漏れ
+- `state_5.sqlite`、`logs_2.sqlite`、`goals_1.sqlite` またはsidecarの退避漏れ
 - Codexが別の `CODEX_HOME` を参照している
 - Windowsネイティブ版ではなくWSL版のバックエンドが起動している
 
@@ -628,7 +642,7 @@ Codexがrollout JSONLを再スキャン済みであれば、旧DBから `threads
 
 - 対応する `sessions/**/*.jsonl` が存在する
 - JSONL先頭の `type` が `session_meta`
-- `payload.cwd` が `C:\...` または `\\wsl.localhost\<DISTRO>\...` 形式
+- 全JSON行の構造化された `cwd` と `writable_roots` がWindows絶対パス形式
 - `payload.thread_source` がユーザースレッドでは `user`
 - JSONLの解析エラーがない
 
@@ -843,7 +857,7 @@ py -3 scripts\current_history_visibility_audit.py --target-style windows --wsl-d
 - `session_index_compare.source_ids_missing_from_index` が `0`
 - `path_validation.problem_count` が `0`
 
-`path_validation.problems` に `UNC\...`、`\home\...`、`/home/...`、`/mnt/c/...`、`C:\mnt\c\...` が出た場合は、Windowsネイティブ版を起動しません。
+`path_validation.problems` に `UNC\...`、`\home\...`、`/home/...`、`/mnt/c/...`、`C:\mnt\c\...`、`C:\...\C:\...` が出た場合は、Windowsネイティブ版を起動しません。
 rollout JSONL、`threads.cwd`、`.codex-global-state.json` の順に、同じ `--wsl-distro` を指定してdry-runとapplyをやり直します。
 
 最後にCodexをWindowsネイティブエージェントとして起動し、次を確認します。
@@ -855,12 +869,16 @@ rollout JSONL、`threads.cwd`、`.codex-global-state.json` の順に、同じ `-
 - 新しいスレッドを作成し、再起動後も表示される
 
 新しいプロンプトの送信時に `AbsolutePathBuf deserialized without a base path` が出る場合、migration checksumとは別の問題です。
-Codexを完全終了し、`path_validation` と `.codex-global-state.json` の4項目を再確認します。
+Codexを完全終了し、`path_validation` と `.codex-global-state.json` のパス保持項目を再確認します。
 
 - `active-workspace-roots`
 - `electron-saved-workspace-roots`
 - `project-order`
 - `thread-workspace-root-hints`
+- `thread-project-assignments.*.cwd`
+- `thread-writable-roots.*[]`
+- `local-projects.*.rootPaths`
+- `electron-persisted-atom-state` 内の `cwd` と `writableRoots`
 
 これらにWindows絶対パスではない値が残っている場合、クリーンDBだけを再生成しても、正本のrollout JSONLまたはUI状態から再取り込みされて再発します。
 
@@ -869,8 +887,8 @@ Codexを完全終了し、`path_validation` と `.codex-global-state.json` の4�
 Windowsネイティブ版で新規スレッドを作成する前であれば、切り替え前の状態へ戻せます。
 
 1. Codexを完全終了する。
-2. 新しく生成された `state_5.sqlite` とsidecarを別の退避先へ移す。
-3. `SWITCH_BACKUP` の `.wsl-live` ファイルを元の名前で `%CODEX_HOME%` へ戻す。
+2. 新しく生成された `state_5.sqlite`、`logs_2.sqlite`、`goals_1.sqlite` と各sidecarを別の退避先へ移す。
+3. `SWITCH_BACKUP` にある3種類のDBの `.wsl-live` ファイルを元の名前で `%CODEX_HOME%` へ戻す。
 4. `repair_rollout_session_meta.py` が作成したJSONLバックアップを戻す。
 5. `session_index.jsonl` と `.codex-global-state.json` を `SWITCH_BACKUP` から戻す。
 6. WSLエージェント設定へ戻してCodexを起動する。
@@ -884,7 +902,7 @@ Windows版とWSL版が同じ `%CODEX_HOME%\state_5.sqlite` を使い続ける構
 単一DBのチェックサムを切り替えのたびに書き換える運用は、実行中バイナリとDBの対応を判別しにくくし、誤ったDBへ書き込む危険を増やします。
 
 継続的に両方のエージェントを使う場合は、Windowsネイティブ用とWSL用で `CODEX_HOME` を分離します。
-共有する対象は `sessions` のrollout JSONLに限定し、各環境の `state_5.sqlite`、sidecar、`session_index.jsonl`、`.codex-global-state.json` はそれぞれの環境に生成させます。
+共有する対象は `sessions` と `archived_sessions` のrollout JSONLに限定し、各環境の `state_5.sqlite`、`logs_2.sqlite`、`goals_1.sqlite`、各sidecar、`session_index.jsonl`、`.codex-global-state.json` はそれぞれの環境に生成させます。
 
 ## 共通復旧手順
 
@@ -900,9 +918,12 @@ Codexを開く前に復旧作業を実施します。
 
 ```text
 %CODEX_HOME%\state_5.sqlite*
+%CODEX_HOME%\logs_2.sqlite*
+%CODEX_HOME%\goals_1.sqlite*
 %CODEX_HOME%\session_index.jsonl
 %CODEX_HOME%\.codex-global-state.json
 %CODEX_HOME%\sessions
+%CODEX_HOME%\archived_sessions
 ```
 
 壊れたDBや当時のバックアップDBも、上書きせず別名で保持します。
@@ -912,9 +933,9 @@ Codexを開く前に復旧作業を実施します。
 Codexが SQLx migration checksum エラーで起動できない場合は、古いDBを直接
 直すより、現行Codexに合うDBを作らせるのが安全です。
 
-1. `state_5.sqlite`, `state_5.sqlite-wal`, `state_5.sqlite-shm` を退避する。
-2. ライブの `state_5.sqlite*` を `%CODEX_HOME%` から外へ移動する。
-3. Codexを一度起動し、現行アプリにクリーンな `state_5.sqlite` を作らせる。
+1. `state_5.sqlite*`、`logs_2.sqlite*`、`goals_1.sqlite*` を退避する。
+2. ライブの3種類のDB本体とsidecarを `%CODEX_HOME%` から外へ移動する。
+3. Codexを一度起動し、現行アプリに3種類のクリーンDBを作らせる。
 4. Codexを完全終了する。
 
 これで古い `_sqlx_migrations` checksum を引きずらずに済みます。
@@ -944,7 +965,7 @@ python scripts\transplant_state5.py merge-live
 多くの場合、CodexがJSONLから履歴行を再構築済みであれば、旧DBからの
 `threads` 移植は不要です。
 
-### 5. 先に rollout JSONL の `session_meta` を直す
+### 5. rollout JSONLの構造化パスを先に直す
 
 今回の系統の問題では、ここが主原因になりやすいです。
 
@@ -980,15 +1001,16 @@ python scripts\repair_rollout_session_meta.py dry-run --target-style %TARGET_STY
 python scripts\repair_rollout_session_meta.py apply --target-style %TARGET_STYLE%
 ```
 
-このスクリプトは、JSONLの先頭行が `type=session_meta` の場合だけ、その
-`payload` を修正します。本文の会話イベントには触りません。
+このスクリプトは `sessions` と `archived_sessions` の全JSON行を解析し、型付きフィールドとして保存されたパスだけを修正します。
+会話本文、コマンド出力、ログ文字列に含まれるパス表記は変更しません。
 
 修正内容:
 
-- `payload.cwd`: `--target-style windows` なら `<DRIVE>:\...` または `\\wsl.localhost\<DISTRO>\...` へ変換
-- `payload.cwd`: `--target-style wsl` なら `/mnt/<drive>/...` へ変換
-- `payload.thread_source`: `source="vscode"` なら `user`
-- `payload.thread_source`: `source={"subagent":...}` なら `subagent`
+- すべての `cwd`：`--target-style windows` なら `<DRIVE>:\...` または `\\wsl.localhost\<DISTRO>\...` へ変換
+- すべての `cwd`：`--target-style wsl` なら `/mnt/<drive>/...` へ変換
+- `writable_roots` と `writableRoots`：配列内の各パスを対象形式へ変換
+- `session_meta.payload.thread_source`：`source="vscode"` なら `user`
+- `session_meta.payload.thread_source`：`source={"subagent":...}` なら `subagent`
 
 バックアップは `%BACKUP_ROOT%\rollout-session-meta-backup-*` に作られます。
 
@@ -1086,7 +1108,7 @@ Codexの `thread/list` は `cwd` の完全一致フィルタを使います。�
 
 そのため、次の3層を一致させる必要があります。
 
-1. `%CODEX_HOME%\sessions\**\rollout-*.jsonl` 先頭の `session_meta.payload`
+1. `%CODEX_HOME%\sessions` と `%CODEX_HOME%\archived_sessions` にあるrollout JSONLの構造化パス
 2. `%CODEX_HOME%\state_5.sqlite` の `threads` 行
 3. UI補助状態の `%CODEX_HOME%\session_index.jsonl` と
    `%CODEX_HOME%\.codex-global-state.json`

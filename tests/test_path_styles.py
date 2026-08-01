@@ -50,6 +50,10 @@ class PathStylesTest(unittest.TestCase):
         self.assertEqual(to_windows_path("/mnt/c/src/project", long_prefix=False), r"C:\src\project")
         self.assertEqual(to_windows_path("/mnt/c/src/project", long_prefix=True), r"\\?\C:\src\project")
 
+    def test_windows_conversion_extracts_embedded_absolute_drive(self):
+        value = r"/mnt/c/Program Files/WindowsApps/OpenAI.Codex/app/resources/C:\src\project"
+        self.assertEqual(to_windows_path(value, long_prefix=False), r"C:\src\project")
+
     def test_wsl_native_path_requires_distro(self):
         with self.assertRaisesRegex(PathConversionError, "requires --wsl-distro"):
             to_windows_path("/home/user/project", long_prefix=False)
@@ -80,7 +84,14 @@ class PathStylesTest(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertTrue(is_windows_absolute_path(value))
                 self.assertIsNone(windows_path_problem(value))
-        for value in (r"UNC\server\share", r"\home\user", "/home/user", "/mnt/c/src", r"C:\mnt\c\src"):
+        for value in (
+            r"UNC\server\share",
+            r"\home\user",
+            "/home/user",
+            "/mnt/c/src",
+            r"C:\mnt\c\src",
+            r"C:\Program Files\Codex\resources\C:\src\project",
+        ):
             with self.subTest(value=value):
                 self.assertIsNotNone(windows_path_problem(value))
 
@@ -96,8 +107,26 @@ class ScriptSafetyTest(unittest.TestCase):
         session_dir.mkdir(parents=True)
         rollout = session_dir / "rollout-test.jsonl"
         rollout.write_text(
-            json.dumps({"type": "session_meta", "payload": {"id": "thread-1", "cwd": cwd, "source": "vscode"}})
-            + "\n",
+            "\n".join([
+                json.dumps({"type": "session_meta", "payload": {"id": "thread-1", "cwd": cwd, "source": "vscode"}}),
+                json.dumps({
+                    "type": "turn_context",
+                    "payload": {"cwd": cwd, "sandbox_policy": {"writable_roots": [cwd]}},
+                }),
+                json.dumps({
+                    "type": "event_msg",
+                    "payload": {
+                        "thread_settings": {"cwd": cwd},
+                        "message": f"free text path must remain unchanged: {cwd}",
+                    },
+                }),
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        archived_dir = home / "archived_sessions"
+        archived_dir.mkdir()
+        (archived_dir / "rollout-archived.jsonl").write_text(
+            json.dumps({"type": "turn_context", "payload": {"cwd": cwd}}) + "\n",
             encoding="utf-8",
         )
         db = sqlite3.connect(home / "state_5.sqlite")
@@ -119,8 +148,16 @@ class ScriptSafetyTest(unittest.TestCase):
             json.dumps({
                 "active-workspace-roots": [cwd],
                 "electron-saved-workspace-roots": [cwd],
-                "project-order": [cwd],
+                "project-order": ["local-project-1", cwd],
                 "thread-workspace-root-hints": {"thread-1": cwd},
+                "thread-project-assignments": {"thread-1": {"cwd": cwd}},
+                "thread-writable-roots": {"thread-1": [cwd]},
+                "local-projects": {"local-project-1": {"rootPaths": [cwd]}},
+                "electron-workspace-root-labels": {cwd: "project"},
+                "electron-persisted-atom-state": {
+                    "sidebar-collapsed-groups": {cwd: True},
+                    "permissions": {"sandboxPolicy": {"writableRoots": [cwd]}},
+                },
             }),
             encoding="utf-8",
         )
@@ -190,7 +227,26 @@ class ScriptSafetyTest(unittest.TestCase):
             state = json.loads((home / ".codex-global-state.json").read_text(encoding="utf-8"))
             expected_ui = r"\\wsl.localhost\Ubuntu\home\user\project"
             self.assertEqual(state["active-workspace-roots"], [expected_ui])
+            self.assertEqual(state["project-order"], ["local-project-1", expected_ui])
             self.assertEqual(state["thread-workspace-root-hints"]["thread-1"], expected_ui)
+            self.assertEqual(state["thread-project-assignments"]["thread-1"]["cwd"], expected_ui)
+            self.assertEqual(state["thread-writable-roots"]["thread-1"], [expected_ui])
+            self.assertEqual(state["local-projects"]["local-project-1"]["rootPaths"], [expected_ui])
+            self.assertEqual(list(state["electron-workspace-root-labels"]), [expected_ui])
+            self.assertEqual(
+                state["electron-persisted-atom-state"]["permissions"]["sandboxPolicy"]["writableRoots"],
+                [expected_ui],
+            )
+
+            rollout = next((home / "sessions").glob("**/rollout-test.jsonl"))
+            rollout_rows = [json.loads(line) for line in rollout.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(rollout_rows[1]["payload"]["cwd"], expected_ui)
+            self.assertEqual(rollout_rows[1]["payload"]["sandbox_policy"]["writable_roots"], [expected_ui])
+            self.assertEqual(rollout_rows[2]["payload"]["thread_settings"]["cwd"], expected_ui)
+            self.assertIn("/home/user/project", rollout_rows[2]["payload"]["message"])
+            archived = json.loads((home / "archived_sessions" / "rollout-archived.jsonl").read_text(encoding="utf-8"))
+            self.assertEqual(archived["payload"]["cwd"], expected_ui)
+
             db = sqlite3.connect(home / "state_5.sqlite")
             self.assertEqual(
                 db.execute("select cwd from threads where id='thread-1'").fetchone()[0],
