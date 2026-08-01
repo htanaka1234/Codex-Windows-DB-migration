@@ -1,15 +1,12 @@
 import json
 import os
-import re
 import shutil
 import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-
-MNT_RE = re.compile(r"^/mnt/([A-Za-z])(?:/(.*))?$")
-DRIVE_RE = re.compile(r"^([A-Za-z]):(?:[\\/](.*))?$")
+from codex_path_styles import PathConversionError, strip_long_windows_prefix, to_windows_path, to_wsl_path
 
 
 def looks_like_codex_home(path: Path) -> bool:
@@ -52,52 +49,23 @@ def default_target_style() -> str:
     return "windows"
 
 
-def strip_long_windows_prefix(value: str) -> str:
-    if value.startswith("\\\\?\\"):
-        return value[4:]
-    return value
-
-
-def norm_windows(path: str | None) -> str:
+def norm_windows(path: str | None, wsl_distro: str | None = None) -> str:
     if not path:
         return ""
-    p = strip_long_windows_prefix(path).replace("/", "\\")
-    m = MNT_RE.match(path.replace("\\", "/"))
-    if m:
-        drive = m.group(1).upper()
-        rest = (m.group(2) or "").replace("/", "\\").rstrip("\\")
-        return f"{drive}:\\{rest}" if rest else f"{drive}:\\"
-    m = DRIVE_RE.match(p)
-    if m:
-        drive = m.group(1).upper()
-        rest = (m.group(2) or "").replace("/", "\\").rstrip("\\")
-        return f"{drive}:\\{rest}" if rest else f"{drive}:\\"
-    return p.rstrip("\\")
+    return to_windows_path(path, long_prefix=False, wsl_distro=wsl_distro)
 
 
 def norm_wsl(path: str | None) -> str:
     if not path:
         return ""
-    p = strip_long_windows_prefix(path)
-    normalized = p.replace("\\", "/")
-    m = MNT_RE.match(normalized)
-    if m:
-        drive = m.group(1).lower()
-        rest = (m.group(2) or "").strip("/")
-        return f"/mnt/{drive}/{rest}" if rest else f"/mnt/{drive}"
-    m = DRIVE_RE.match(p)
-    if m:
-        drive = m.group(1).lower()
-        rest = (m.group(2) or "").replace("\\", "/").strip("/")
-        return f"/mnt/{drive}/{rest}" if rest else f"/mnt/{drive}"
-    return normalized.rstrip("/")
+    return to_wsl_path(path)
 
 
-def norm_root(path: str | None, target_style: str) -> str:
+def norm_root(path: str | None, target_style: str, wsl_distro: str | None = None) -> str:
     if target_style == "wsl":
         return norm_wsl(path)
     if target_style == "windows":
-        return norm_windows(path)
+        return norm_windows(path, wsl_distro)
     raise ValueError(f"unsupported target style: {target_style}")
 
 
@@ -145,6 +113,7 @@ def main() -> int:
     target_style = default_target_style()
     codex_home = default_codex_home()
     backup_root = default_backup_root()
+    wsl_distro = os.environ.get("WSL_DISTRO_NAME")
 
     i = 0
     while i < len(args):
@@ -166,10 +135,16 @@ def main() -> int:
             if i >= len(args):
                 raise SystemExit("--backup-root requires a value")
             backup_root = Path(args[i])
+        elif arg == "--wsl-distro":
+            i += 1
+            if i >= len(args):
+                raise SystemExit("--wsl-distro requires a value")
+            wsl_distro = args[i]
         else:
             raise SystemExit(
                 "usage: repair_ui_indexes.py [dry-run|apply] "
-                "[--target-style windows|wsl|auto] [--codex-home PATH] [--backup-root PATH]"
+                "[--target-style windows|wsl|auto] [--wsl-distro NAME] "
+                "[--codex-home PATH] [--backup-root PATH]"
             )
         i += 1
 
@@ -202,12 +177,17 @@ def main() -> int:
     else:
         state = {}
     new_state = json.loads(json.dumps(state))
+    conversion_errors = []
     for key in ("active-workspace-roots", "electron-saved-workspace-roots", "project-order"):
         if isinstance(new_state.get(key), list):
             seen = set()
             values = []
             for item in new_state[key]:
-                value = norm_root(item, target_style) if isinstance(item, str) else item
+                try:
+                    value = norm_root(item, target_style, wsl_distro) if isinstance(item, str) else item
+                except PathConversionError as exc:
+                    conversion_errors.append({"source": key, "value": item, "error": str(exc)})
+                    value = item
                 dedupe = value.lower() if isinstance(value, str) else repr(value)
                 if dedupe not in seen:
                     seen.add(dedupe)
@@ -215,13 +195,34 @@ def main() -> int:
             new_state[key] = values
 
     hints = dict(new_state.get("thread-workspace-root-hints", {}))
+    for thread_id, value in list(hints.items()):
+        if not isinstance(value, str):
+            continue
+        try:
+            hints[thread_id] = norm_root(value, target_style, wsl_distro)
+        except PathConversionError as exc:
+            conversion_errors.append({
+                "source": "thread-workspace-root-hints",
+                "thread_id": thread_id,
+                "value": value,
+                "error": str(exc),
+            })
     for thread in threads:
-        hints[thread["id"]] = norm_root(thread["cwd"], target_style)
+        try:
+            hints[thread["id"]] = norm_root(thread["cwd"], target_style, wsl_distro)
+        except PathConversionError as exc:
+            conversion_errors.append({
+                "source": "threads.cwd",
+                "thread_id": thread["id"],
+                "value": thread["cwd"],
+                "error": str(exc),
+            })
     new_state["thread-workspace-root-hints"] = hints
 
     diff = {
         "mode": mode,
         "target_style": target_style,
+        "wsl_distro": wsl_distro,
         "codex_home": str(codex_home),
         "session_index_old_rows": len(old_index),
         "session_index_new_rows": len(new_index),
@@ -230,8 +231,13 @@ def main() -> int:
         "global_state_project_order_new": new_state.get("project-order"),
         "thread_workspace_root_hints_old_count": len(state.get("thread-workspace-root-hints", {})),
         "thread_workspace_root_hints_new_count": len(hints),
+        "cwd_conversion_errors": conversion_errors[:20],
     }
     print(json.dumps({"plan": diff}, ensure_ascii=False, indent=2))
+
+    if conversion_errors:
+        print("Refusing to continue because one or more workspace roots cannot be converted safely.", file=sys.stderr)
+        return 2
 
     if mode == "dry-run":
         return 0

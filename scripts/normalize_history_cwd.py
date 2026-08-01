@@ -1,16 +1,12 @@
 import json
 import os
-import re
 import shutil
 import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
 
-
-MNT_RE = re.compile(r"^/mnt/([A-Za-z])(?:/(.*))?$")
-DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
-DRIVE_SPLIT_RE = re.compile(r"^([A-Za-z]):(?:[\\/](.*))?$")
+from codex_path_styles import PathConversionError, strip_long_windows_prefix, to_windows_path, to_wsl_path
 
 
 def looks_like_codex_home(path: Path) -> bool:
@@ -53,55 +49,19 @@ def default_target_style() -> str:
     return "windows"
 
 
-def strip_long_windows_prefix(value: str) -> str:
-    if value.startswith("\\\\?\\"):
-        return value[4:]
-    return value
-
-
 def to_wsl_cwd(value: str) -> str:
-    value = strip_long_windows_prefix(value or "")
-    normalized = value.replace("\\", "/")
-    m = MNT_RE.match(normalized)
-    if m:
-        drive = m.group(1).lower()
-        rest = (m.group(2) or "").replace("\\", "/").strip("/")
-        return f"/mnt/{drive}/{rest}" if rest else f"/mnt/{drive}"
-
-    m = DRIVE_SPLIT_RE.match(value)
-    if not m:
-        return normalized.rstrip("/")
-    drive = m.group(1).lower()
-    rest = (m.group(2) or "").replace("\\", "/").strip("/")
-    return f"/mnt/{drive}/{rest}" if rest else f"/mnt/{drive}"
+    return to_wsl_path(value)
 
 
-def to_windows_cwd(value: str, *, long_prefix: bool) -> str:
-    if not value:
-        return value
-    if value.startswith("\\\\?\\"):
-        base = value.replace("/", "\\")
-        return base if long_prefix else base[4:].rstrip("\\")
-    m = MNT_RE.match(value)
-    if m:
-        drive = m.group(1).upper()
-        rest = (m.group(2) or "").replace("/", "\\")
-        if rest:
-            base = f"{drive}:\\{rest}"
-        else:
-            base = f"{drive}:\\"
-        return f"\\\\?\\{base}" if long_prefix else base.rstrip("\\")
-    if DRIVE_RE.match(value):
-        base = value.replace("/", "\\")
-        return f"\\\\?\\{base}" if long_prefix and not base.startswith("\\\\?\\") else base.rstrip("\\")
-    return value.replace("/", "\\") if long_prefix else value.replace("/", "\\").rstrip("\\")
+def to_windows_cwd(value: str, *, long_prefix: bool, wsl_distro: str | None = None) -> str:
+    return to_windows_path(value, long_prefix=long_prefix, wsl_distro=wsl_distro)
 
 
-def canonical_cwd(value: str, target_style: str) -> str:
+def canonical_cwd(value: str, target_style: str, wsl_distro: str | None = None) -> str:
     if target_style == "wsl":
         return to_wsl_cwd(value)
     if target_style == "windows":
-        return to_windows_cwd(value, long_prefix=True)
+        return to_windows_cwd(value, long_prefix=True, wsl_distro=wsl_distro)
     raise ValueError(f"unsupported target style: {target_style}")
 
 
@@ -125,15 +85,20 @@ def backup_db(con: sqlite3.Connection, backup_dir: Path, target_style: str) -> P
     return backup_path
 
 
-def analyze(con: sqlite3.Connection, target_style: str):
+def analyze(con: sqlite3.Connection, target_style: str, wsl_distro: str | None = None):
     candidates = rows(
         con,
         "select id,cwd,source,thread_source,archived,substr(title,1,80) title "
         "from threads order by updated_at_ms desc, id desc",
     )
     cwd_updates = []
+    cwd_errors = []
     for row in candidates:
-        new = canonical_cwd(row["cwd"], target_style)
+        try:
+            new = canonical_cwd(row["cwd"], target_style, wsl_distro)
+        except PathConversionError as exc:
+            cwd_errors.append({"id": row["id"], "cwd": row["cwd"], "error": str(exc)})
+            continue
         if new != row["cwd"]:
             cwd_updates.append({**row, "new_cwd": new})
     source_updates = rows(
@@ -143,7 +108,7 @@ def analyze(con: sqlite3.Connection, target_style: str):
         "and preview<>'' and first_user_message<>'' "
         "order by updated_at_ms desc, id desc",
     )
-    return cwd_updates, source_updates
+    return cwd_updates, source_updates, cwd_errors
 
 
 def summarize(con: sqlite3.Connection):
@@ -170,6 +135,7 @@ def main() -> int:
     target_style = default_target_style()
     codex_home = default_codex_home()
     backup_dir = default_backup_dir()
+    wsl_distro = os.environ.get("WSL_DISTRO_NAME")
 
     i = 0
     while i < len(args):
@@ -191,10 +157,16 @@ def main() -> int:
             if i >= len(args):
                 raise SystemExit("--backup-root requires a value")
             backup_dir = Path(args[i])
+        elif arg == "--wsl-distro":
+            i += 1
+            if i >= len(args):
+                raise SystemExit("--wsl-distro requires a value")
+            wsl_distro = args[i]
         else:
             raise SystemExit(
                 "usage: normalize_history_cwd.py [dry-run|apply] "
-                "[--target-style windows|wsl|auto] [--codex-home PATH] [--backup-root PATH]"
+                "[--target-style windows|wsl|auto] [--wsl-distro NAME] "
+                "[--codex-home PATH] [--backup-root PATH]"
             )
         i += 1
 
@@ -210,16 +182,21 @@ def main() -> int:
     con = sqlite3.connect(str(db))
     con.row_factory = sqlite3.Row
     try:
-        cwd_updates, source_updates = analyze(con, target_style)
+        cwd_updates, source_updates, cwd_errors = analyze(con, target_style, wsl_distro)
         print_json("plan", {
             "mode": mode,
             "target_style": target_style,
+            "wsl_distro": wsl_distro,
             "db": str(db),
             "cwd_rows_to_update": len(cwd_updates),
             "thread_source_rows_to_update": len(source_updates),
             "cwd_update_sample": cwd_updates[:12],
             "thread_source_update_sample": source_updates[:12],
+            "cwd_conversion_errors": cwd_errors[:20],
         })
+        if cwd_errors:
+            print("Refusing to continue because one or more cwd values cannot be converted safely.", file=sys.stderr)
+            return 2
         if mode == "dry-run":
             summarize(con)
             return 0

@@ -1,14 +1,11 @@
 import json
 import os
-import re
 import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
 
-
-MNT_RE = re.compile(r"^/mnt/([A-Za-z])(?:/(.*))?$")
-DRIVE_RE = re.compile(r"^([A-Za-z]):(?:[\\/](.*))?$")
+from codex_path_styles import PathConversionError, strip_long_windows_prefix, to_windows_path, to_wsl_path
 
 
 def looks_like_codex_home(path: Path) -> bool:
@@ -59,51 +56,19 @@ def default_target_style() -> str:
     return "windows"
 
 
-def strip_long_windows_prefix(value: str) -> str:
-    if value.startswith("\\\\?\\"):
-        return value[4:]
-    return value
-
-
-def windows_cwd(value: str) -> str:
-    value = strip_long_windows_prefix(value or "")
-    m = MNT_RE.match(value or "")
-    if not m:
-        m = DRIVE_RE.match(value or "")
-        if m:
-            drive = m.group(1).upper()
-            rest = (m.group(2) or "").replace("/", "\\").rstrip("\\")
-            return f"{drive}:\\{rest}" if rest else f"{drive}:\\"
-        return value.replace("/", "\\").rstrip("\\")
-    drive = m.group(1).upper()
-    rest = (m.group(2) or "").replace("/", "\\")
-    if rest:
-        return f"{drive}:\\{rest}"
-    return f"{drive}:\\"
+def windows_cwd(value: str, wsl_distro: str | None = None) -> str:
+    return to_windows_path(value, long_prefix=False, wsl_distro=wsl_distro)
 
 
 def wsl_cwd(value: str) -> str:
-    value = strip_long_windows_prefix(value or "")
-    m = MNT_RE.match(value.replace("\\", "/"))
-    if m:
-        drive = m.group(1).lower()
-        rest = (m.group(2) or "").replace("\\", "/").strip("/")
-        return f"/mnt/{drive}/{rest}" if rest else f"/mnt/{drive}"
-
-    m = DRIVE_RE.match(value)
-    if not m:
-        return value.replace("\\", "/").rstrip("/")
-
-    drive = m.group(1).lower()
-    rest = (m.group(2) or "").replace("\\", "/").strip("/")
-    return f"/mnt/{drive}/{rest}" if rest else f"/mnt/{drive}"
+    return to_wsl_path(value)
 
 
-def normalize_cwd(value: str, target_style: str) -> str:
+def normalize_cwd(value: str, target_style: str, wsl_distro: str | None = None) -> str:
     if target_style == "wsl":
         return wsl_cwd(value)
     if target_style == "windows":
-        return windows_cwd(value)
+        return windows_cwd(value, wsl_distro)
     raise ValueError(f"unsupported target style: {target_style}")
 
 
@@ -115,7 +80,7 @@ def desired_thread_source(source):
     return None
 
 
-def analyze_file(path: Path, target_style: str):
+def analyze_file(path: Path, target_style: str, wsl_distro: str | None = None):
     raw = path.read_bytes()
     newline = raw.find(b"\n")
     if newline < 0:
@@ -135,7 +100,10 @@ def analyze_file(path: Path, target_style: str):
     changes = {}
 
     cwd = payload.get("cwd")
-    new_cwd = normalize_cwd(cwd, target_style) if isinstance(cwd, str) else cwd
+    try:
+        new_cwd = normalize_cwd(cwd, target_style, wsl_distro) if isinstance(cwd, str) else cwd
+    except PathConversionError as exc:
+        return None, {"path": str(path), "cwd": cwd, "error": str(exc), "blocking": True}
     if new_cwd != cwd:
         changes["cwd"] = {"old": cwd, "new": new_cwd}
 
@@ -168,6 +136,7 @@ def main() -> int:
     target_style = default_target_style()
     codex_home = default_codex_home()
     backup_root = default_backup_root()
+    wsl_distro = os.environ.get("WSL_DISTRO_NAME")
 
     i = 0
     while i < len(args):
@@ -189,10 +158,16 @@ def main() -> int:
             if i >= len(args):
                 raise SystemExit("--backup-root requires a value")
             backup_root = Path(args[i])
+        elif arg == "--wsl-distro":
+            i += 1
+            if i >= len(args):
+                raise SystemExit("--wsl-distro requires a value")
+            wsl_distro = args[i]
         else:
             raise SystemExit(
                 "usage: repair_rollout_session_meta.py [dry-run|apply] "
-                "[--target-style windows|wsl|auto] [--codex-home PATH] [--backup-root PATH]"
+                "[--target-style windows|wsl|auto] [--wsl-distro NAME] "
+                "[--codex-home PATH] [--backup-root PATH]"
             )
         i += 1
 
@@ -209,7 +184,7 @@ def main() -> int:
     errors = []
     session_files = sorted(sessions.glob("**/rollout-*.jsonl"))
     for path in session_files:
-        candidate, error = analyze_file(path, target_style)
+        candidate, error = analyze_file(path, target_style, wsl_distro)
         if error:
             errors.append(error)
         if candidate:
@@ -219,6 +194,7 @@ def main() -> int:
         "mode": mode,
         "target_style": target_style,
         "codex_home": str(codex_home),
+        "wsl_distro": wsl_distro,
         "session_files_scanned": len(session_files),
         "files_to_update": len(candidates),
         "errors": errors[:20],
@@ -233,6 +209,10 @@ def main() -> int:
         ],
     }
     print(json.dumps({"plan": summary}, ensure_ascii=False, indent=2, default=str))
+
+    if any(error.get("blocking") for error in errors):
+        print("Refusing to continue because one or more cwd values cannot be converted safely.", file=sys.stderr)
+        return 2
 
     if mode == "dry-run":
         return 0

@@ -1,13 +1,17 @@
 import json
 import os
-import re
 import sqlite3
 import sys
 from pathlib import Path
 
-
-MNT_RE = re.compile(r"^/mnt/([A-Za-z])(?:/(.*))?$")
-DRIVE_RE = re.compile(r"^([A-Za-z]):(?:[\\/](.*))?$")
+from codex_agent_config import audit_agent_config
+from codex_path_styles import (
+    PathConversionError,
+    strip_long_windows_prefix,
+    to_windows_path,
+    to_wsl_path,
+    windows_path_problem,
+)
 
 
 def looks_like_codex_home(path: Path) -> bool:
@@ -68,52 +72,23 @@ def one(con: sqlite3.Connection, sql: str, args=()):
     return dict(row)
 
 
-def strip_long_windows_prefix(value: str) -> str:
-    if value.startswith("\\\\?\\"):
-        return value[4:]
-    return value
-
-
-def norm_windows(path: str | None) -> str:
+def norm_windows(path: str | None, wsl_distro: str | None = None) -> str:
     if not path:
         return ""
-    p = strip_long_windows_prefix(path).replace("/", "\\")
-    m = MNT_RE.match(path.replace("\\", "/"))
-    if m:
-        drive = m.group(1).upper()
-        rest = (m.group(2) or "").replace("/", "\\").rstrip("\\")
-        return f"{drive}:\\{rest}" if rest else f"{drive}:\\"
-    m = DRIVE_RE.match(p)
-    if m:
-        drive = m.group(1).upper()
-        rest = (m.group(2) or "").replace("/", "\\").rstrip("\\")
-        return f"{drive}:\\{rest}" if rest else f"{drive}:\\"
-    return p.rstrip("\\")
+    return to_windows_path(path, long_prefix=False, wsl_distro=wsl_distro)
 
 
 def norm_wsl(path: str | None) -> str:
     if not path:
         return ""
-    p = strip_long_windows_prefix(path)
-    normalized = p.replace("\\", "/")
-    m = MNT_RE.match(normalized)
-    if m:
-        drive = m.group(1).lower()
-        rest = (m.group(2) or "").strip("/")
-        return f"/mnt/{drive}/{rest}" if rest else f"/mnt/{drive}"
-    m = DRIVE_RE.match(p)
-    if m:
-        drive = m.group(1).lower()
-        rest = (m.group(2) or "").replace("\\", "/").strip("/")
-        return f"/mnt/{drive}/{rest}" if rest else f"/mnt/{drive}"
-    return normalized.rstrip("/")
+    return to_wsl_path(path)
 
 
-def norm_root(path: str | None, target_style: str) -> str:
+def norm_root(path: str | None, target_style: str, wsl_distro: str | None = None) -> str:
     if target_style == "wsl":
         return norm_wsl(path)
     if target_style == "windows":
-        return norm_windows(path)
+        return norm_windows(path, wsl_distro)
     raise ValueError(f"unsupported target style: {target_style}")
 
 
@@ -136,7 +111,19 @@ def print_json(name, value):
     print(json.dumps({name: value}, ensure_ascii=False, indent=2, default=str))
 
 
-def inspect_state_db(state_db: Path, target_style: str):
+def path_audit(value: str, target_style: str, wsl_distro: str | None = None):
+    result = {"value": value}
+    if target_style == "windows":
+        result["problem"] = windows_path_problem(value)
+    try:
+        result["normalized_for_target"] = norm_root(value, target_style, wsl_distro)
+    except PathConversionError as exc:
+        result["normalized_for_target"] = None
+        result["problem"] = str(exc)
+    return result
+
+
+def inspect_state_db(state_db: Path, target_style: str, wsl_distro: str | None = None):
     with connect_ro(state_db) as con:
         print_json("state_db", {
             "path": str(state_db),
@@ -166,24 +153,39 @@ def inspect_state_db(state_db: Path, target_style: str):
             "sum(case when source='vscode' and thread_source='user' and archived=0 then 1 else 0 end) visible_user_like "
             "from threads group by cwd order by total desc, cwd",
         )
+        problems = []
         for row in by_cwd:
-            row["normalized_for_target"] = norm_root(row["cwd"], target_style)
+            audit = path_audit(row["cwd"], target_style, wsl_distro)
+            row["normalized_for_target"] = audit["normalized_for_target"]
+            row["path_problem"] = audit.get("problem")
+            if audit.get("problem"):
+                problems.append({"source": "threads.cwd", "cwd": row["cwd"], "problem": audit["problem"]})
         print_json("state_by_cwd", by_cwd)
-        return rows(
+        live_rows = rows(
             con,
             "select id, cwd, source, thread_source, archived, preview from threads",
         )
+        return live_rows, problems
 
 
-def inspect_global_state(global_state: Path, live_rows, target_style: str):
+def inspect_global_state(global_state: Path, live_rows, target_style: str, wsl_distro: str | None = None):
     if not global_state.exists():
         print_json("global_state", {"path": str(global_state), "exists": False})
-        return
+        return []
     state = load_json(global_state)
     saved = []
+    problems = []
     for key in ("active-workspace-roots", "electron-saved-workspace-roots", "project-order"):
         for value in state.get(key, []):
-            saved.append({"source": key, "root": value, "normalized": norm_root(value, target_style)})
+            audit = path_audit(value, target_style, wsl_distro)
+            saved.append({
+                "source": key,
+                "root": value,
+                "normalized": audit["normalized_for_target"],
+                "path_problem": audit.get("problem"),
+            })
+            if audit.get("problem"):
+                problems.append({"source": key, "value": value, "problem": audit["problem"]})
     counts = []
     for item in saved:
         exact = sum(
@@ -195,21 +197,39 @@ def inspect_global_state(global_state: Path, live_rows, target_style: str):
             and row["archived"] == 0
             and row["preview"] != ""
         )
-        normalized = sum(
-            1
-            for row in live_rows
-            if norm_root(row["cwd"], target_style).lower() == item["normalized"].lower()
-            and row["source"] == "vscode"
-            and row["thread_source"] == "user"
-            and row["archived"] == 0
-            and row["preview"] != ""
-        )
+        normalized = 0
+        if item["normalized"] is not None:
+            for row in live_rows:
+                try:
+                    row_normalized = norm_root(row["cwd"], target_style, wsl_distro)
+                except PathConversionError:
+                    continue
+                if (
+                    row_normalized.lower() == item["normalized"].lower()
+                    and row["source"] == "vscode"
+                    and row["thread_source"] == "user"
+                    and row["archived"] == 0
+                    and row["preview"] != ""
+                ):
+                    normalized += 1
         counts.append({**item, "exact_visible_user_like": exact, "normalized_visible_user_like": normalized})
     print_json("workspace_root_match_counts", counts)
+    hints = state.get("thread-workspace-root-hints", {})
+    hint_audits = []
+    for thread_id, value in hints.items():
+        if not isinstance(value, str):
+            continue
+        audit = path_audit(value, target_style, wsl_distro)
+        if audit.get("problem"):
+            problem = {"source": "thread-workspace-root-hints", "thread_id": thread_id, "value": value, "problem": audit["problem"]}
+            problems.append(problem)
+            hint_audits.append(problem)
     print_json("thread_workspace_root_hints", {
-        "count": len(state.get("thread-workspace-root-hints", {})),
-        "sample": dict(list(state.get("thread-workspace-root-hints", {}).items())[:10]),
+        "count": len(hints),
+        "sample": dict(list(hints.items())[:10]),
+        "path_problems": hint_audits[:20],
     })
+    return problems
 
 
 def inspect_session_index(session_index: Path, source_db: Path | None, live_rows):
@@ -265,6 +285,7 @@ def main() -> int:
     target_style = default_target_style()
     codex_home = default_codex_home()
     source_db = default_source_db()
+    wsl_distro = os.environ.get("WSL_DISTRO_NAME")
 
     i = 0
     while i < len(args):
@@ -284,10 +305,16 @@ def main() -> int:
             if i >= len(args):
                 raise SystemExit("--source-db requires a value")
             source_db = Path(args[i])
+        elif arg == "--wsl-distro":
+            i += 1
+            if i >= len(args):
+                raise SystemExit("--wsl-distro requires a value")
+            wsl_distro = args[i]
         else:
             raise SystemExit(
                 "usage: current_history_visibility_audit.py "
-                "[--target-style windows|wsl|auto] [--codex-home PATH] [--source-db PATH]"
+                "[--target-style windows|wsl|auto] [--wsl-distro NAME] "
+                "[--codex-home PATH] [--source-db PATH]"
             )
         i += 1
 
@@ -300,12 +327,22 @@ def main() -> int:
     log_db = codex_home / "logs_2.sqlite"
     session_index = codex_home / "session_index.jsonl"
     global_state = codex_home / ".codex-global-state.json"
+    config_path = codex_home / "config.toml"
 
-    live_rows = inspect_state_db(state_db, target_style)
-    inspect_global_state(global_state, live_rows, target_style)
+    live_rows, path_problems = inspect_state_db(state_db, target_style, wsl_distro)
+    path_problems.extend(inspect_global_state(global_state, live_rows, target_style, wsl_distro))
     inspect_session_index(session_index, source_db, live_rows)
     inspect_logs_db(log_db)
-    return 0
+    config_audit = audit_agent_config(config_path, target_style, wsl_distro)
+    print_json("agent_config_paths", config_audit)
+    path_problems.extend(config_audit["problems"])
+    print_json("path_validation", {
+        "target_style": target_style,
+        "wsl_distro": wsl_distro,
+        "problem_count": len(path_problems),
+        "problems": path_problems[:50],
+    })
+    return 2 if path_problems else 0
 
 
 if __name__ == "__main__":

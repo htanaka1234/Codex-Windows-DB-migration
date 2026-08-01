@@ -9,6 +9,8 @@ Codex DesktopでWindowsネイティブエージェントとWSLエージェント
 - `state_5.sqlite` の `integrity_check` と `quick_check`
 - Windows版とWSL版のmigration checksum不一致の調査
 - rollout JSONLに保存された `cwd` と `thread_source` の正規化
+- 長形式UNCを壊さないWindows絶対パス変換と検証
+- `config.toml` の `agents.<role>.config_file` の監査とOS間変換
 - `state_5.sqlite` の履歴メタデータの正規化
 - `session_index.jsonl` と `.codex-global-state.json` の再構築
 - Windows側Codex homeからWSL側Codex homeへの履歴移植
@@ -66,24 +68,43 @@ WSLからWindowsネイティブエージェントへ切り替える前に、Powe
 ```powershell
 $CodexHome = Join-Path $env:USERPROFILE ".codex"
 $BackupRoot = "C:\path\to\codex-backups"
+$WslDistro = "Ubuntu"
+
+py -3 scripts\repair_agent_config_paths.py dry-run `
+  --target-style windows `
+  --wsl-distro $WslDistro `
+  --codex-home $CodexHome `
+  --backup-root $BackupRoot
 
 py -3 scripts\repair_rollout_session_meta.py dry-run `
   --target-style windows `
+  --wsl-distro $WslDistro `
   --codex-home $CodexHome `
   --backup-root $BackupRoot
 
 py -3 scripts\normalize_history_cwd.py dry-run `
   --target-style windows `
+  --wsl-distro $WslDistro `
   --codex-home $CodexHome `
   --backup-root $BackupRoot
 
 py -3 scripts\repair_ui_indexes.py dry-run `
   --target-style windows `
+  --wsl-distro $WslDistro `
   --codex-home $CodexHome `
   --backup-root $BackupRoot
 ```
 
 `apply` の実行順序は、[WSLからWindowsネイティブへ切り替える場合](docs/codex-state5-recovery-runbook.md#wslからwindowsネイティブへ切り替える場合)に従います。
+
+`/mnt/c/...` は `C:\...` へ変換できます。
+`/home/...` などのWSLネイティブパスはドライブパスを推測できないため、`--wsl-distro` を指定した場合だけ `\\wsl.localhost\<DISTRO>\...` へ変換します。
+指定がない場合や、`\home\...` のように既に情報が欠けた値がある場合、スクリプトは適用前に終了コード2で停止します。
+`current_history_visibility_audit.py` の `path_validation.problem_count` が `0` であることを、Windowsネイティブ版の起動前に確認してください。
+
+公式仕様では、`agents.<role>.config_file` の相対パスは、そのロールを宣言した `config.toml` を基準に解決されます。
+`repair_agent_config_paths.py` は相対パスを既定で保持し、切り替え先OSと不整合な絶対パスだけを変換します。
+同じエラーが相対的な `config_file` で再現するCodexビルドに限り、`--absolutize-relative` を指定できます。
 
 ## `--backup-root` の役割
 
@@ -111,6 +132,7 @@ mkdir -p "$BACKUP_ROOT"
 | `repair_rollout_session_meta.py` | 変更対象となるrollout JSONLの原本 |
 | `normalize_history_cwd.py` | 更新直前の `state_5.sqlite` の一貫したスナップショット |
 | `repair_ui_indexes.py` | 更新前の `session_index.jsonl` と `.codex-global-state.json` |
+| `repair_agent_config_paths.py` | 更新前の `config.toml` |
 | `migrate_windows_codex_home_to_wsl.py` | 変更前の移行先DB、sidecar、UI補助状態 |
 
 バックアップには会話内容、スレッド名、ローカルパスなどが含まれる場合があります。
@@ -127,11 +149,18 @@ Codex homeと同等の機密データとして扱い、Gitへ追加したり不�
 | `repair_rollout_session_meta.py` | rollout JSONLの `cwd` と `thread_source` を正規化する |
 | `normalize_history_cwd.py` | DB内の履歴メタデータをWindows形式またはWSL形式へ揃える |
 | `repair_ui_indexes.py` | `session_index.jsonl` とグローバルUI状態を再構築する |
+| `repair_agent_config_paths.py` | `agents.<role>.config_file` の不整合な絶対パスを修復する |
 | `migrate_windows_codex_home_to_wsl.py` | Windows側からWSL側へセッションと履歴行を移植する |
 | `repair_state5.py` | SQLiteの検査と限定的な復旧操作を行う |
 | `scan_codex_app.py` | Codexバイナリ内のmigration情報を調査する |
 
 その他の `scripts/` 配下のファイルは、特定の不整合を調査するための補助スクリプトです。
+
+## テスト
+
+```sh
+python3 -m unittest discover -s tests -v
+```
 
 ## 環境変数
 

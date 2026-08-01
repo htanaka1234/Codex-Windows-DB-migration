@@ -160,6 +160,7 @@ BACKUP_ROOT/
 | `repair_rollout_session_meta.py` | 実際に変更するrollout JSONL | Codex homeからの相対パスを保った専用ディレクトリへ原本をコピーする |
 | `normalize_history_cwd.py` | 更新直前のライブDB | SQLite Backup APIで一貫した `state_5.sqlite` スナップショットを1ファイル作成する |
 | `repair_ui_indexes.py` | `session_index.jsonl` と `.codex-global-state.json` | UI補助状態を書き換える直前の原本を個別にコピーする |
+| `repair_agent_config_paths.py` | 更新前の `config.toml` | エージェント設定のパスを書き換える直前の原本をコピーする |
 | `migrate_windows_codex_home_to_wsl.py` | 変更前の移行先DB、WAL、SHM、UI補助状態 | 存在する移行先ファイルだけを個別にコピーする |
 
 変更対象が0件の場合は、そのスクリプトのバックアップが作成されないことがあります。
@@ -268,6 +269,7 @@ WSL用DBの `_sqlx_migrations.checksum` は書き換えず、Windowsネイティ
 CODEX_HOME=/mnt/c/Users/WINDOWS_USERNAME/.codex
 RECOVERY_WORKDIR=/mnt/c/path/to/Codex-Windows-DB-migration
 BACKUP_ROOT=/mnt/c/path/to/codex-backups
+WSL_DISTRO=Ubuntu
 ```
 
 PowerShellでは、同じパスをWindows形式で設定します。
@@ -276,6 +278,7 @@ PowerShellでは、同じパスをWindows形式で設定します。
 $CodexHome = Join-Path $env:USERPROFILE ".codex"
 $RecoveryWorkdir = "C:\path\to\Codex-Windows-DB-migration"
 $BackupRoot = "C:\path\to\codex-backups"
+$WslDistro = "Ubuntu"
 ```
 
 コマンドプロンプトでは、次の環境変数を設定します。
@@ -284,10 +287,26 @@ $BackupRoot = "C:\path\to\codex-backups"
 set "CODEX_HOME=%USERPROFILE%\.codex"
 set "RECOVERY_WORKDIR=C:\path\to\Codex-Windows-DB-migration"
 set "BACKUP_ROOT=C:\path\to\codex-backups"
+set "WSL_DISTRO=Ubuntu"
 ```
 
 Windows側のコマンド例はPython Launcherの `py -3` を使用します。
 `py -3 --version` が失敗する環境では、各コマンドの `py -3` を `python` に置き換えます。
+
+`Ubuntu` は、履歴を作成したWSLディストリビューション名へ置き換えます。
+WSLシェルでは `printf '%s\n' "$WSL_DISTRO_NAME"`、PowerShellまたはコマンドプロンプトでは `wsl.exe --list --quiet` で候補を確認できます。
+
+Windows形式への変換規則は次のとおりです。
+
+- `/mnt/c/path/to/project` は `C:\path\to\project` へ変換する。
+- `\\?\UNC\wsl.localhost\Ubuntu\home\user\project` は、先頭を失わず `\\wsl.localhost\Ubuntu\home\user\project` へ変換する。
+- `/home/user/project` は `--wsl-distro Ubuntu` が指定された場合だけ `\\wsl.localhost\Ubuntu\home\user\project` へ変換する。
+- `UNC\...` は、長形式UNCの変換時に先頭が失われた値として `\\...` へ修復する。
+- `\home\...`、相対パス、空文字列は、変換先を一意に決められないため処理を停止する。
+
+`--wsl-distro` を省略した場合、スクリプトは環境変数 `WSL_DISTRO_NAME` を使用します。
+PowerShellやコマンドプロンプトから実行すると通常は設定されていないため、この手順では明示的に渡します。
+変換不能な値が1件でもあれば、dry-runとapplyの両方が終了コード2で停止し、applyもファイルやDBを書き換えません。
 
 ### 1. 切り替え前の状態を監査する
 
@@ -364,6 +383,7 @@ test ! -e "$CODEX_HOME/state_5.sqlite-shm" || cp -a "$CODEX_HOME/state_5.sqlite-
 cp -a "$CODEX_HOME/sessions" "$SWITCH_BACKUP/"
 test ! -e "$CODEX_HOME/session_index.jsonl" || cp -a "$CODEX_HOME/session_index.jsonl" "$SWITCH_BACKUP/"
 test ! -e "$CODEX_HOME/.codex-global-state.json" || cp -a "$CODEX_HOME/.codex-global-state.json" "$SWITCH_BACKUP/"
+test ! -e "$CODEX_HOME/config.toml" || cp -a "$CODEX_HOME/config.toml" "$SWITCH_BACKUP/"
 ```
 
 PowerShell:
@@ -373,7 +393,7 @@ $Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $SwitchBackup = Join-Path $BackupRoot "wsl-before-windows-native-$Stamp"
 New-Item -ItemType Directory -Path $SwitchBackup -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $CodexHome "state_5.sqlite") -Destination $SwitchBackup
-foreach ($Name in @("state_5.sqlite-wal", "state_5.sqlite-shm", "session_index.jsonl", ".codex-global-state.json")) {
+foreach ($Name in @("state_5.sqlite-wal", "state_5.sqlite-shm", "session_index.jsonl", ".codex-global-state.json", "config.toml")) {
     $Source = Join-Path $CodexHome $Name
     if (Test-Path -LiteralPath $Source) {
         Copy-Item -LiteralPath $Source -Destination $SwitchBackup
@@ -393,13 +413,56 @@ if exist "%CODEX_HOME%\state_5.sqlite-wal" copy /y "%CODEX_HOME%\state_5.sqlite-
 if exist "%CODEX_HOME%\state_5.sqlite-shm" copy /y "%CODEX_HOME%\state_5.sqlite-shm" "%SWITCH_BACKUP%\"
 if exist "%CODEX_HOME%\session_index.jsonl" copy /y "%CODEX_HOME%\session_index.jsonl" "%SWITCH_BACKUP%\"
 if exist "%CODEX_HOME%\.codex-global-state.json" copy /y "%CODEX_HOME%\.codex-global-state.json" "%SWITCH_BACKUP%\"
+if exist "%CODEX_HOME%\config.toml" copy /y "%CODEX_HOME%\config.toml" "%SWITCH_BACKUP%\"
 xcopy "%CODEX_HOME%\sessions" "%SWITCH_BACKUP%\sessions\" /E /I /H /K /Y
 ```
 
 存在しない補助ファイルがある場合は、そのファイルのコピーだけを省略します。
 バックアップ先に `state_5.sqlite` と `sessions` が存在することを確認してから次へ進みます。
 
-### 4. rollout JSONLをWindows形式へ変換する
+### 4. エージェント設定ファイルのパスを監査する
+
+Codexの現行仕様では、`agents.<role>.config_file` の相対パスは、そのロールを宣言した `config.toml` の位置を基準に解決されます。
+したがって、`./agents/reviewer.toml` のような相対値は通常は変更しません。
+
+一方、Windowsネイティブ版へ切り替える設定に `/mnt/c/...`、`/home/...`、壊れたUNCが残っている場合は変換が必要です。
+まずdry-runします。
+
+WSLシェル:
+
+```sh
+python3 scripts/repair_agent_config_paths.py dry-run \
+  --target-style windows \
+  --wsl-distro "$WSL_DISTRO" \
+  --codex-home "$CODEX_HOME" \
+  --backup-root "$BACKUP_ROOT"
+```
+
+PowerShell:
+
+```powershell
+py -3 scripts\repair_agent_config_paths.py dry-run `
+  --target-style windows `
+  --wsl-distro $WslDistro `
+  --codex-home $CodexHome `
+  --backup-root $BackupRoot
+```
+
+コマンドプロンプト:
+
+```bat
+py -3 scripts\repair_agent_config_paths.py dry-run --target-style windows --wsl-distro "%WSL_DISTRO%" --codex-home "%CODEX_HOME%" --backup-root "%BACKUP_ROOT%"
+```
+
+`changes` が妥当であれば、`dry-run` を `apply` に置き換えて実行します。
+applyは変更前の `config.toml` を `BACKUP_ROOT` へ保存します。
+
+相対的な `config_file` で同じエラーが再現するCodexビルドに限り、`--absolutize-relative` をdry-runへ追加します。
+このオプションは設定ファイルの移動可能性を下げるため、既定では使用しません。
+
+プロジェクト固有の `.codex/config.toml` を調べる場合は、同じコマンドへ `--config <CONFIG_PATH>` を追加します。
+
+### 5. rollout JSONLをWindows形式へ変換する
 
 クリーンDBを生成する前に、履歴の正本であるrollout JSONLをWindows形式へ揃えます。
 先にJSONLを直すことで、Windowsネイティブ版による初回スキャン時に `threads.cwd` がWSL形式へ戻ることを防ぎます。
@@ -410,6 +473,7 @@ WSLシェル:
 cd "$RECOVERY_WORKDIR"
 python3 scripts/repair_rollout_session_meta.py dry-run \
   --target-style windows \
+  --wsl-distro "$WSL_DISTRO" \
   --codex-home "$CODEX_HOME" \
   --backup-root "$BACKUP_ROOT"
 ```
@@ -420,6 +484,7 @@ PowerShell:
 Set-Location $RecoveryWorkdir
 py -3 scripts\repair_rollout_session_meta.py dry-run `
   --target-style windows `
+  --wsl-distro $WslDistro `
   --codex-home $CodexHome `
   --backup-root $BackupRoot
 ```
@@ -428,7 +493,7 @@ py -3 scripts\repair_rollout_session_meta.py dry-run `
 
 ```bat
 cd /d "%RECOVERY_WORKDIR%"
-py -3 scripts\repair_rollout_session_meta.py dry-run --target-style windows --codex-home "%CODEX_HOME%" --backup-root "%BACKUP_ROOT%"
+py -3 scripts\repair_rollout_session_meta.py dry-run --target-style windows --wsl-distro "%WSL_DISTRO%" --codex-home "%CODEX_HOME%" --backup-root "%BACKUP_ROOT%"
 ```
 
 ドライランの `files_to_update` とJSON parse errorを確認します。
@@ -439,6 +504,7 @@ WSLシェル:
 ```sh
 python3 scripts/repair_rollout_session_meta.py apply \
   --target-style windows \
+  --wsl-distro "$WSL_DISTRO" \
   --codex-home "$CODEX_HOME" \
   --backup-root "$BACKUP_ROOT"
 ```
@@ -448,6 +514,7 @@ PowerShell:
 ```powershell
 py -3 scripts\repair_rollout_session_meta.py apply `
   --target-style windows `
+  --wsl-distro $WslDistro `
   --codex-home $CodexHome `
   --backup-root $BackupRoot
 ```
@@ -455,13 +522,13 @@ py -3 scripts\repair_rollout_session_meta.py apply `
 コマンドプロンプト:
 
 ```bat
-py -3 scripts\repair_rollout_session_meta.py apply --target-style windows --codex-home "%CODEX_HOME%" --backup-root "%BACKUP_ROOT%"
+py -3 scripts\repair_rollout_session_meta.py apply --target-style windows --wsl-distro "%WSL_DISTRO%" --codex-home "%CODEX_HOME%" --backup-root "%BACKUP_ROOT%"
 ```
 
 適用後に同じドライランを再実行し、`files_to_update` が `0` になることを確認します。
 この段階ではWSL用 `state_5.sqlite` の `threads.cwd` や `_sqlx_migrations` を変更しません。
 
-### 5. WSL用DBをライブ位置から退避する
+### 6. WSL用DBをライブ位置から退避する
 
 Windowsネイティブ版にクリーンDBを作らせるため、DB本体とsidecarを同じバックアップディレクトリへ移します。
 削除はしません。
@@ -495,7 +562,7 @@ if exist "%CODEX_HOME%\state_5.sqlite-shm" move /y "%CODEX_HOME%\state_5.sqlite-
 
 `%CODEX_HOME%` に `state_5.sqlite`、`state_5.sqlite-wal`、`state_5.sqlite-shm` が残っていないことを確認します。
 
-### 6. Windowsネイティブ版にクリーンDBを生成させる
+### 7. Windowsネイティブ版にクリーンDBを生成させる
 
 Codexのエージェント設定がWindowsネイティブであることを確認してから、Codexを一度起動します。
 ホーム画面またはプロジェクト画面まで到達し、`%CODEX_HOME%\state_5.sqlite` が新しく作成されたことを確認します。
@@ -523,7 +590,7 @@ dir "%CODEX_HOME%\state_5.sqlite"
 
 原因を解消せずに `_sqlx_migrations.checksum` を直接更新してはいけません。
 
-### 7. 新しいDBの履歴を監査する
+### 8. 新しいDBの履歴を監査する
 
 Windowsネイティブ版が生成したDBを対象に監査します。
 
@@ -533,6 +600,7 @@ WSLシェル:
 cd "$RECOVERY_WORKDIR"
 python3 scripts/current_history_visibility_audit.py \
   --target-style windows \
+  --wsl-distro "$WSL_DISTRO" \
   --codex-home "$CODEX_HOME"
 ```
 
@@ -542,6 +610,7 @@ PowerShell:
 Set-Location $RecoveryWorkdir
 py -3 scripts\current_history_visibility_audit.py `
   --target-style windows `
+  --wsl-distro $WslDistro `
   --codex-home $CodexHome
 ```
 
@@ -549,7 +618,7 @@ py -3 scripts\current_history_visibility_audit.py `
 
 ```bat
 cd /d "%RECOVERY_WORKDIR%"
-py -3 scripts\current_history_visibility_audit.py --target-style windows --codex-home "%CODEX_HOME%"
+py -3 scripts\current_history_visibility_audit.py --target-style windows --wsl-distro "%WSL_DISTRO%" --codex-home "%CODEX_HOME%"
 ```
 
 切り替え前に記録した表示対象ユーザースレッド数と比較します。
@@ -559,14 +628,14 @@ Codexがrollout JSONLを再スキャン済みであれば、旧DBから `threads
 
 - 対応する `sessions/**/*.jsonl` が存在する
 - JSONL先頭の `type` が `session_meta`
-- `payload.cwd` が `C:\...` 形式
+- `payload.cwd` が `C:\...` または `\\wsl.localhost\<DISTRO>\...` 形式
 - `payload.thread_source` がユーザースレッドでは `user`
 - JSONLの解析エラーがない
 
 JSONLが正常でも再構築されない場合だけ、退避したDBを移植元として `threads` 行の移植を検討します。
 移植先DBの `_sqlx_migrations` とスキーマは変更せず、移植前に双方の `sqlite_schema` が互換であることを確認します。
 
-### 8. DB内の履歴メタデータをWindows形式へ揃える
+### 9. DB内の履歴メタデータをWindows形式へ揃える
 
 新しいDBに残ったWSL形式の `cwd` と欠損した `thread_source` を確認します。
 
@@ -575,6 +644,7 @@ WSLシェル:
 ```sh
 python3 scripts/normalize_history_cwd.py dry-run \
   --target-style windows \
+  --wsl-distro "$WSL_DISTRO" \
   --codex-home "$CODEX_HOME" \
   --backup-root "$BACKUP_ROOT"
 ```
@@ -584,6 +654,7 @@ PowerShell:
 ```powershell
 py -3 scripts\normalize_history_cwd.py dry-run `
   --target-style windows `
+  --wsl-distro $WslDistro `
   --codex-home $CodexHome `
   --backup-root $BackupRoot
 ```
@@ -591,7 +662,7 @@ py -3 scripts\normalize_history_cwd.py dry-run `
 コマンドプロンプト:
 
 ```bat
-py -3 scripts\normalize_history_cwd.py dry-run --target-style windows --codex-home "%CODEX_HOME%" --backup-root "%BACKUP_ROOT%"
+py -3 scripts\normalize_history_cwd.py dry-run --target-style windows --wsl-distro "%WSL_DISTRO%" --codex-home "%CODEX_HOME%" --backup-root "%BACKUP_ROOT%"
 ```
 
 更新対象が妥当であれば適用し、再度ドライランします。
@@ -601,6 +672,7 @@ WSLシェル:
 ```sh
 python3 scripts/normalize_history_cwd.py apply \
   --target-style windows \
+  --wsl-distro "$WSL_DISTRO" \
   --codex-home "$CODEX_HOME" \
   --backup-root "$BACKUP_ROOT"
 ```
@@ -610,6 +682,7 @@ PowerShell:
 ```powershell
 py -3 scripts\normalize_history_cwd.py apply `
   --target-style windows `
+  --wsl-distro $WslDistro `
   --codex-home $CodexHome `
   --backup-root $BackupRoot
 ```
@@ -617,7 +690,7 @@ py -3 scripts\normalize_history_cwd.py apply `
 コマンドプロンプト:
 
 ```bat
-py -3 scripts\normalize_history_cwd.py apply --target-style windows --codex-home "%CODEX_HOME%" --backup-root "%BACKUP_ROOT%"
+py -3 scripts\normalize_history_cwd.py apply --target-style windows --wsl-distro "%WSL_DISTRO%" --codex-home "%CODEX_HOME%" --backup-root "%BACKUP_ROOT%"
 ```
 
 次の2項目が `0` になれば、DB内の履歴メタデータはWindows形式です。
@@ -627,7 +700,7 @@ py -3 scripts\normalize_history_cwd.py apply --target-style windows --codex-home
 "thread_source_rows_to_update": 0
 ```
 
-### 9. UI補助状態をWindows形式へ揃える
+### 10. UI補助状態をWindows形式へ揃える
 
 新しいDBの表示対象スレッドを基準に、`session_index.jsonl` と `.codex-global-state.json` を再構築します。
 
@@ -636,6 +709,7 @@ WSLシェル:
 ```sh
 python3 scripts/repair_ui_indexes.py dry-run \
   --target-style windows \
+  --wsl-distro "$WSL_DISTRO" \
   --codex-home "$CODEX_HOME" \
   --backup-root "$BACKUP_ROOT"
 ```
@@ -645,6 +719,7 @@ PowerShell:
 ```powershell
 py -3 scripts\repair_ui_indexes.py dry-run `
   --target-style windows `
+  --wsl-distro $WslDistro `
   --codex-home $CodexHome `
   --backup-root $BackupRoot
 ```
@@ -652,7 +727,7 @@ py -3 scripts\repair_ui_indexes.py dry-run `
 コマンドプロンプト:
 
 ```bat
-py -3 scripts\repair_ui_indexes.py dry-run --target-style windows --codex-home "%CODEX_HOME%" --backup-root "%BACKUP_ROOT%"
+py -3 scripts\repair_ui_indexes.py dry-run --target-style windows --wsl-distro "%WSL_DISTRO%" --codex-home "%CODEX_HOME%" --backup-root "%BACKUP_ROOT%"
 ```
 
 更新対象が妥当であれば適用します。
@@ -662,6 +737,7 @@ WSLシェル:
 ```sh
 python3 scripts/repair_ui_indexes.py apply \
   --target-style windows \
+  --wsl-distro "$WSL_DISTRO" \
   --codex-home "$CODEX_HOME" \
   --backup-root "$BACKUP_ROOT"
 ```
@@ -671,6 +747,7 @@ PowerShell:
 ```powershell
 py -3 scripts\repair_ui_indexes.py apply `
   --target-style windows `
+  --wsl-distro $WslDistro `
   --codex-home $CodexHome `
   --backup-root $BackupRoot
 ```
@@ -678,64 +755,84 @@ py -3 scripts\repair_ui_indexes.py apply `
 コマンドプロンプト:
 
 ```bat
-py -3 scripts\repair_ui_indexes.py apply --target-style windows --codex-home "%CODEX_HOME%" --backup-root "%BACKUP_ROOT%"
+py -3 scripts\repair_ui_indexes.py apply --target-style windows --wsl-distro "%WSL_DISTRO%" --codex-home "%CODEX_HOME%" --backup-root "%BACKUP_ROOT%"
 ```
 
-### 10. 切り替え結果を検証する
+### 11. 切り替え結果を検証する
 
-3つの修復スクリプトをドライランで再実行します。
+4つの修復スクリプトをドライランで再実行します。
 
 WSLシェル:
 
 ```sh
+python3 scripts/repair_agent_config_paths.py dry-run \
+  --target-style windows \
+  --wsl-distro "$WSL_DISTRO" \
+  --codex-home "$CODEX_HOME" \
+  --backup-root "$BACKUP_ROOT"
 python3 scripts/repair_rollout_session_meta.py dry-run \
   --target-style windows \
+  --wsl-distro "$WSL_DISTRO" \
   --codex-home "$CODEX_HOME" \
   --backup-root "$BACKUP_ROOT"
 python3 scripts/normalize_history_cwd.py dry-run \
   --target-style windows \
+  --wsl-distro "$WSL_DISTRO" \
   --codex-home "$CODEX_HOME" \
   --backup-root "$BACKUP_ROOT"
 python3 scripts/repair_ui_indexes.py dry-run \
   --target-style windows \
+  --wsl-distro "$WSL_DISTRO" \
   --codex-home "$CODEX_HOME" \
   --backup-root "$BACKUP_ROOT"
 python3 scripts/current_history_visibility_audit.py \
   --target-style windows \
+  --wsl-distro "$WSL_DISTRO" \
   --codex-home "$CODEX_HOME"
 ```
 
 PowerShell:
 
 ```powershell
+py -3 scripts\repair_agent_config_paths.py dry-run `
+  --target-style windows `
+  --wsl-distro $WslDistro `
+  --codex-home $CodexHome `
+  --backup-root $BackupRoot
 py -3 scripts\repair_rollout_session_meta.py dry-run `
   --target-style windows `
+  --wsl-distro $WslDistro `
   --codex-home $CodexHome `
   --backup-root $BackupRoot
 py -3 scripts\normalize_history_cwd.py dry-run `
   --target-style windows `
+  --wsl-distro $WslDistro `
   --codex-home $CodexHome `
   --backup-root $BackupRoot
 py -3 scripts\repair_ui_indexes.py dry-run `
   --target-style windows `
+  --wsl-distro $WslDistro `
   --codex-home $CodexHome `
   --backup-root $BackupRoot
 py -3 scripts\current_history_visibility_audit.py `
   --target-style windows `
+  --wsl-distro $WslDistro `
   --codex-home $CodexHome
 ```
 
 コマンドプロンプト:
 
 ```bat
-py -3 scripts\repair_rollout_session_meta.py dry-run --target-style windows --codex-home "%CODEX_HOME%" --backup-root "%BACKUP_ROOT%"
-py -3 scripts\normalize_history_cwd.py dry-run --target-style windows --codex-home "%CODEX_HOME%" --backup-root "%BACKUP_ROOT%"
-py -3 scripts\repair_ui_indexes.py dry-run --target-style windows --codex-home "%CODEX_HOME%" --backup-root "%BACKUP_ROOT%"
-py -3 scripts\current_history_visibility_audit.py --target-style windows --codex-home "%CODEX_HOME%"
+py -3 scripts\repair_agent_config_paths.py dry-run --target-style windows --wsl-distro "%WSL_DISTRO%" --codex-home "%CODEX_HOME%" --backup-root "%BACKUP_ROOT%"
+py -3 scripts\repair_rollout_session_meta.py dry-run --target-style windows --wsl-distro "%WSL_DISTRO%" --codex-home "%CODEX_HOME%" --backup-root "%BACKUP_ROOT%"
+py -3 scripts\normalize_history_cwd.py dry-run --target-style windows --wsl-distro "%WSL_DISTRO%" --codex-home "%CODEX_HOME%" --backup-root "%BACKUP_ROOT%"
+py -3 scripts\repair_ui_indexes.py dry-run --target-style windows --wsl-distro "%WSL_DISTRO%" --codex-home "%CODEX_HOME%" --backup-root "%BACKUP_ROOT%"
+py -3 scripts\current_history_visibility_audit.py --target-style windows --wsl-distro "%WSL_DISTRO%" --codex-home "%CODEX_HOME%"
 ```
 
 期待結果は次のとおりです。
 
+- エージェント設定側の `changes` と `errors` が空
 - rollout側の `files_to_update` が `0`
 - DB側の `cwd_rows_to_update` が `0`
 - DB側の `thread_source_rows_to_update` が `0`
@@ -744,13 +841,28 @@ py -3 scripts\current_history_visibility_audit.py --target-style windows --codex
 - `vscode_thread_source_null_rows` が空
 - `session_index_compare.live_visible_user_ids_missing_from_index` が `0`
 - `session_index_compare.source_ids_missing_from_index` が `0`
+- `path_validation.problem_count` が `0`
+
+`path_validation.problems` に `UNC\...`、`\home\...`、`/home/...`、`/mnt/c/...`、`C:\mnt\c\...` が出た場合は、Windowsネイティブ版を起動しません。
+rollout JSONL、`threads.cwd`、`.codex-global-state.json` の順に、同じ `--wsl-distro` を指定してdry-runとapplyをやり直します。
 
 最後にCodexをWindowsネイティブエージェントとして起動し、次を確認します。
 
 - checksumエラーが出ない
 - 切り替え前と同数のユーザースレッドが表示される
 - Windows形式のワークスペースごとに履歴が表示される
+- 既存プロジェクトで新しいプロンプトを送信できる
 - 新しいスレッドを作成し、再起動後も表示される
+
+新しいプロンプトの送信時に `AbsolutePathBuf deserialized without a base path` が出る場合、migration checksumとは別の問題です。
+Codexを完全終了し、`path_validation` と `.codex-global-state.json` の4項目を再確認します。
+
+- `active-workspace-roots`
+- `electron-saved-workspace-roots`
+- `project-order`
+- `thread-workspace-root-hints`
+
+これらにWindows絶対パスではない値が残っている場合、クリーンDBだけを再生成しても、正本のrollout JSONLまたはUI状態から再取り込みされて再発します。
 
 ### 切り替えを取り消す場合
 
@@ -860,6 +972,8 @@ WSLエージェント時にCodexが期待する形式:
 python scripts\repair_rollout_session_meta.py dry-run --target-style %TARGET_STYLE%
 ```
 
+`TARGET_STYLE=windows` かつ `/home/...` を含む場合は、コマンドへ `--wsl-distro %WSL_DISTRO%` を追加します。
+
 `files_to_update` が0でなければ適用します。
 
 ```cmd
@@ -871,7 +985,7 @@ python scripts\repair_rollout_session_meta.py apply --target-style %TARGET_STYLE
 
 修正内容:
 
-- `payload.cwd`: `--target-style windows` なら `<DRIVE>:\...` へ変換
+- `payload.cwd`: `--target-style windows` なら `<DRIVE>:\...` または `\\wsl.localhost\<DISTRO>\...` へ変換
 - `payload.cwd`: `--target-style wsl` なら `/mnt/<drive>/...` へ変換
 - `payload.thread_source`: `source="vscode"` なら `user`
 - `payload.thread_source`: `source={"subagent":...}` なら `subagent`

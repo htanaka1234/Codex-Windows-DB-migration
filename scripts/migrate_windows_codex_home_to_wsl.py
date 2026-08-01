@@ -1,11 +1,12 @@
 import json
 import os
-import re
 import shutil
 import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+from codex_path_styles import strip_long_windows_prefix, to_wsl_path
 
 
 DEFAULT_SOURCE_HOME = Path(os.environ.get("CODEX_WINDOWS_HOME", Path.home() / ".codex"))
@@ -22,10 +23,6 @@ TABLES = [
     "agent_job_items",
     "remote_control_enrollments",
 ]
-
-MNT_RE = re.compile(r"^/mnt/([A-Za-z])(?:/(.*))?$")
-DRIVE_RE = re.compile(r"^([A-Za-z]):(?:[\\/](.*))?$")
-
 
 def quote(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
@@ -48,28 +45,10 @@ def table_count(con: sqlite3.Connection, db: str, table: str) -> int:
     return con.execute(f"select count(*) from {db}.{quote(table)}").fetchone()[0]
 
 
-def strip_long_windows_prefix(value: str) -> str:
-    if value.startswith("\\\\?\\"):
-        return value[4:]
-    return value
-
-
 def norm_wsl(path: str | None) -> str:
     if not path:
         return ""
-    raw = strip_long_windows_prefix(path)
-    normalized = raw.replace("\\", "/")
-    m = MNT_RE.match(normalized)
-    if m:
-        drive = m.group(1).lower()
-        rest = (m.group(2) or "").strip("/")
-        return f"/mnt/{drive}/{rest}" if rest else f"/mnt/{drive}"
-    m = DRIVE_RE.match(raw)
-    if m:
-        drive = m.group(1).lower()
-        rest = (m.group(2) or "").replace("\\", "/").strip("/")
-        return f"/mnt/{drive}/{rest}" if rest else f"/mnt/{drive}"
-    return normalized.rstrip("/")
+    return to_wsl_path(path)
 
 
 def iso_from_ms(ms):
